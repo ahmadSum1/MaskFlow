@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11131a">
+  <meta name="description" content="A private, browser-based viewer for NumPy arrays and segmentation masks.">
+  <title>MaskFlow — Visualize what matters</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="MaskFlow home"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span>maskflow<span class="brand-dot">.</span></span></a>
+    <div class="topbar-right">
+      <span class="privacy"><span class="privacy-dot"></span> ALL PROCESSING IS LOCAL</span>
+      <a class="github-link" href="https://github.com/ahmadSum1/MaskFlow" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+      <details id="help-menu" class="help-menu">
+        <summary aria-label="Help and sample dataset" title="Help and sample dataset">i</summary>
+        <div class="help-panel">
+          <strong>Getting started</strong>
+          <p>Load your files or try two example image and mask pairs.</p>
+          <button id="load-sample" class="button button-outline">Load samples</button>
+          <small>Loading samples replaces the current dataset.</small>
+        </div>
+      </details>
+    </div>
+  </header>
+
+  <main class="app">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-heading"><div><div class="eyebrow">YOUR WORKSPACE</div><h2>Dataset <span id="dataset-count" class="count">0</span></h2></div></div>
+      <div class="sidebar-actions"><button id="choose-folder" class="button button-outline"><span aria-hidden="true">▱</span> Load folder</button><button id="choose-files" class="button button-outline"><span aria-hidden="true">＋</span> Load files</button><details id="add-folder-menu" class="add-folder-menu" hidden><summary class="button button-outline">＋ Add folder</summary><div><button id="add-dataset-folder" type="button">Add dataset folder</button><button id="add-masks-folder" type="button">Add masks folder</button></div></details><button id="clear-dataset" class="button button-outline clear-dataset" disabled>Clear dataset</button></div>
+      <div class="dataset-controls">
+        <div><label for="filter-items">FILTER</label><select id="filter-items"><option value="all">All items</option><option value="paired">Paired</option><option value="single">Single base</option><option value="orphan">Orphan mask</option></select></div>
+        <div><label for="sort-items">SORT BY</label><select id="sort-items"><option value="path">Path</option><option value="name">Name</option><option value="size">File size</option><option value="area">Dimensions</option><option value="modified">Modified time</option></select></div>
+        <div class="sort-order"><span>ORDER</span><div class="sort-arrows" role="group" aria-label="Sort order"><button id="sort-asc" type="button" class="button button-outline" aria-label="Ascending" title="Ascending" aria-pressed="true" disabled>↑</button><button id="sort-desc" type="button" class="button button-outline" aria-label="Descending" title="Descending" aria-pressed="false">↓</button></div></div>
+        <label class="view-switch"><span>Group by pair status</span><input id="group-items" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+        <label class="view-switch"><span>Tree view</span><input id="tree-toggle" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
+      </div>
+      <details id="advanced-menu" class="advanced-menu" hidden><summary>Advanced</summary><div><button id="match-loaded" class="button button-outline" type="button">Match loaded folders</button><button id="remove-folders" class="button button-outline" type="button">Remove folders</button></div></details>
+      <div id="busy-indicator" class="busy-indicator" hidden><div class="busy-status" role="status"><span class="spinner" aria-hidden="true"></span><span id="busy-message"></span></div><div id="picker-recovery" class="picker-recovery" hidden><span>If the picker is closed but this message remains:</span><button id="reset-picker" type="button">Stop waiting</button><button id="fallback-picker" type="button" hidden>Try alternative folder picker</button></div></div>
+      <div id="view-status" class="view-status" role="status"></div>
+      <div class="dataset-label"><span>FILES &amp; PAIRS</span><span id="pair-summary">0 items</span></div>
+      <div id="dataset-list" class="dataset-list" tabindex="0" aria-label="Dataset items; use up and down arrow keys to navigate"><div class="list-empty">Your dataset will appear here.<br>Choose a folder or files to get started.</div></div>
+      <div class="sidebar-footer"><div class="shortcut-icon">⌘</div><div><strong>Made for visual thinking</strong><span>Your files never leave your device.</span></div></div>
+      <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Resize dataset panel" aria-controls="sidebar" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="600" aria-valuenow="260" tabindex="0" title="Drag or use arrow keys to resize the dataset panel"></div>
+    </aside>
+
+    <section class="workspace">
+      <div class="workspace-header"><div><div class="breadcrumb">WORKSPACE <span>/</span> <strong>VIEWER</strong></div><h1>Visualize what matters<span class="accent">.</span></h1><p>Explore your images, arrays, and masks in one place.</p></div><div class="workspace-header-right"><span class="status-dot"></span> <span id="status">Ready to explore</span></div></div>
+
+      <div class="viewer-card">
+        <div class="viewer-toolbar"><div class="viewer-title"><span class="viewer-icon">◈</span><div><strong id="viewer-name">Canvas</strong><span id="viewer-subtitle">Your visual workspace</span></div></div><div class="toolbar-right"><span id="dimension-badge" class="dimension-badge" hidden></span><span class="live-badge"><span></span> LIVE PREVIEW</span></div></div>
+        <div id="drop-zone" class="canvas-area">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-art" aria-hidden="true"><div class="art-layer art-layer-back"></div><div class="art-layer art-layer-middle"></div><div class="art-layer art-layer-front"><span>✦</span></div><i class="art-spark art-spark-one">✳</i><i class="art-spark art-spark-two">✦</i></div>
+            <div class="empty-kicker">A CLEARER PICTURE STARTS HERE</div>
+            <h2>Bring your data into focus.</h2>
+            <p>Drop images and NumPy arrays here, or choose<br class="desktop-break"> a folder to start exploring your dataset.</p>
+            <div class="empty-actions"><button id="empty-folder" class="button button-primary"><span aria-hidden="true">▱</span> Load a folder <span aria-hidden="true">↗</span></button><button id="empty-files" class="button button-ghost">Load files</button></div>
+            <div class="supported">SUPPORTS <span>.NPY</span> <span>.PNG</span> <span>.JPG</span> <span>.WEBP</span> <span>+ MORE</span></div>
+          </div>
+          <div id="canvas-wrap" class="canvas-wrap" hidden><div id="canvas-stack" class="canvas-stack"><canvas id="base-canvas"></canvas><canvas id="mask-canvas"></canvas></div></div>
+          <div id="no-matches" class="empty-state" hidden><h2>No matching items.</h2><p>Change the filter to see more files.</p></div>
+          <div id="error-message" class="error-message" role="alert" hidden></div>
+        </div>
+        <div class="viewer-bottom"><div><span class="keyboard">←</span><span class="keyboard">→</span> <span class="viewer-hint">to navigate</span></div><div class="navigation"><button id="previous" class="nav-button" aria-label="Previous item" disabled>←</button><input id="jump-index" type="number" min="1" step="1" aria-label="Go to item number" aria-describedby="index-error" disabled><span>/ <span id="position">0</span></span><button id="next" class="nav-button" aria-label="Next item" disabled>→</button></div><div class="viewer-bottom-right">BUILT FOR EXPLORATION <span>✳</span></div></div>
+      </div>
+      <div id="index-error" class="notice" role="alert" hidden></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div class="below-viewer"><span><span class="green-dot"></span> PRIVATE BY DESIGN</span><span>LOCAL FILES. JUST INSIGHTS.</span></div>
+    </section>
+
+    <aside class="inspector">
+      <div class="inspector-heading"><div class="eyebrow">MAKE IT YOURS</div><h2>Display settings</h2><p>Fine-tune your view in real time.</p></div>
+      <div class="settings-section"><div class="section-title"><span class="section-icon">◐</span> Overlay <span class="section-number">01</span></div>
+        <label class="input-label" for="mask-select">MASK / GROUND TRUTH</label><div class="select-wrap"><select id="mask-select" disabled><option>No mask selected</option></select></div>
+        <div class="mask-actions"><button id="add-mask" class="button button-outline" disabled>Add mask</button><button id="replace-mask" class="button button-outline" disabled>Replace mask</button></div>
+        <button id="swap-layers" class="button button-outline swap-button" disabled>⇅ Swap front / back</button><p id="layer-order" class="layer-order">Select a mask to arrange layers.</p>
+        <div class="setting-row"><label for="opacity">Front layer opacity</label><output id="opacity-value" for="opacity">60%</output></div><input id="opacity" type="range" min="0" max="100" value="60"><div class="range-labels"><span>TRANSPARENT</span><span>OPAQUE</span></div></div>
+      <div class="settings-section"><div class="section-title"><span class="section-icon">◉</span> Appearance <span class="section-number">02</span></div><label class="input-label" for="colormap">COLORMAP</label><div class="select-wrap"><select id="colormap"><option value="viridis">Viridis</option><option value="plasma">Plasma</option><option value="inferno">Inferno</option><option value="jet">Jet</option><option value="gray">Grayscale</option></select></div><div id="color-ramp" class="color-ramp"></div><div class="range-labels"><span>LOW VALUE</span><span>HIGH VALUE</span></div></div>
+      <div class="settings-section details-section"><div class="section-title"><span class="section-icon">▤</span> File details <span class="section-number">03</span></div><dl class="details"><div><dt>Base</dt><dd id="detail-base">—</dd></div><div><dt>Mask</dt><dd id="detail-mask">—</dd></div><div><dt>Dimensions</dt><dd id="detail-dimensions">—</dd></div><div><dt>Data range</dt><dd id="detail-range">—</dd></div></dl></div>
+      <div class="inspector-tip"><span>✳</span><div><strong>A little tip</strong><p>Matching images and masks are paired automatically by filename.</p></div></div>
+    </aside>
+  </main>
+  <div id="file-menu" class="file-menu" role="group" aria-label="File actions" hidden>
+    <strong id="file-menu-name"></strong>
+    <button id="copy-file-name" type="button">Copy file name</button>
+    <button id="copy-file-path" type="button">Copy relative path</button>
+    <button type="button" disabled>Open folder in Explorer</button>
+    <p id="file-menu-note">Browsers cannot reveal local folders or access absolute paths.</p>
+  </div>
+  <dialog id="matching-dialog" class="folder-dialog" aria-labelledby="matching-title">
+    <form id="matching-form">
+      <h2 id="matching-title">Match folders</h2>
+      <p>Drag paths into Base or Masks, or use the arrow buttons. Select a base path to edit its masks and rule. Paths include subfolders and can appear on both sides. Existing pairs are preserved.</p>
+      <div class="path-assignment">
+        <section id="base-drop" class="path-column"><label for="match-base">Base paths (select one to edit)</label><select id="match-base" size="5"></select><button id="clear-base-path" type="button" class="button button-outline">Remove selected base</button></section>
+        <section class="path-column"><label for="path-search">Available paths</label><input id="path-search" type="search" placeholder="Filter paths"><div id="path-candidates" class="path-candidates" aria-label="Available paths"></div></section>
+        <section id="mask-drop" class="path-column"><label for="match-masks">Mask paths for selected base</label><select id="match-masks" multiple size="5"></select><button id="clear-mask-path" type="button" class="button button-outline">Remove selected</button></section>
+      </div>
+      <p id="new-mask-note" hidden>The mask path will be selected in the folder picker.</p>
+      <label for="match-rule">Filename matching for selected base</label>
+      <select id="match-rule"><option value="default">Existing automatic matching</option><option value="numeric">Numeric ID (P1 / HEsalmap_1)</option><option value="example">Learn from an example pair</option><option value="affixes">Remove prefixes and suffixes</option><option value="regex">Regular expressions</option></select>
+      <div id="match-example" class="match-fields" hidden>
+        <p>Choose a known base and mask from the assigned paths. Search by filename, then select the shared ID. Search results show up to 100 files.</p>
+        <label for="example-base-search">Find example base</label><input id="example-base-search" type="search" placeholder="Search base filenames">
+        <label for="example-base">Example base file</label><select id="example-base"></select>
+        <label for="example-mask-search">Find example mask</label><input id="example-mask-search" type="search" placeholder="Search mask filenames">
+        <label for="example-mask">Example mask file</label><select id="example-mask"></select>
+        <label for="example-id">Shared ID</label><select id="example-id"></select>
+        <p id="example-rule"></p>
+      </div>
+      <div id="match-affixes" class="match-fields" hidden>
+        <label for="base-prefix">Base prefix</label><input id="base-prefix" type="text">
+        <label for="base-suffix">Base suffix</label><input id="base-suffix" type="text">
+        <label for="mask-prefix">Mask prefix</label><input id="mask-prefix" type="text">
+        <label for="mask-suffix">Mask suffix</label><input id="mask-suffix" type="text">
+      </div>
+      <div id="match-regex" class="match-fields" hidden>
+        <p>Match the filename without its extension. The first capture group must contain the shared ID.</p>
+        <label for="base-regex">Base expression</label><input id="base-regex" type="text" placeholder="^P(\d+)_\d+x\d+$">
+        <label for="mask-regex">Mask expression</label><input id="mask-regex" type="text" placeholder="^HEsalmap_(\d+)$">
+      </div>
+      <p id="matching-error" class="dialog-error" role="alert" hidden></p>
+      <div id="match-preview" class="match-preview" hidden><strong id="preview-summary"></strong><ul id="preview-groups"></ul><ul id="preview-pairs"></ul><p>Showing up to 20 proposed pairs. Nothing changes until you apply.</p></div>
+      <div class="dialog-actions"><button id="matching-cancel" class="button button-outline" type="button">Cancel</button><button id="matching-submit" class="button button-primary" type="submit">Match folders</button></div>
+    </form>
+  </dialog>
+  <dialog id="remove-dialog" class="folder-dialog" aria-labelledby="remove-title">
+    <form id="remove-form">
+      <h2 id="remove-title">Remove folders</h2>
+      <p>Remove files directly in the selected folders from the viewer. Files in other folders are kept, including unpaired bases and masks. Nothing is deleted from disk.</p>
+      <label for="remove-paths">Folders (Ctrl/Cmd-click for multiple)</label><select id="remove-paths" multiple size="8"></select>
+      <label class="remove-subfolders"><input id="remove-subfolders" type="checkbox"> Include subfolders</label>
+      <p id="remove-error" class="dialog-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="remove-cancel" class="button button-outline" type="button">Cancel</button><button class="button button-primary" type="submit">Remove selected</button></div>
+    </form>
+  </dialog>
+  <input id="files-input" type="file" accept=".npy,image/*" multiple hidden>
+  <input id="folder-input" type="file" webkitdirectory multiple hidden>
+  <input id="add-folder-input" type="file" webkitdirectory multiple hidden>
+  <input id="mask-input" type="file" accept=".npy,image/*" hidden>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
