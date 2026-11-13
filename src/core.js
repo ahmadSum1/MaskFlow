@@ -297,7 +297,7 @@ function halfToNumber(bits) {
   return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
 }
 
-export function parseNpy(buffer) {
+export function parseNpyHeader(buffer, fileSize = buffer.byteLength) {
   const view = new DataView(buffer);
   if (buffer.byteLength < 10 || view.getUint8(0) !== 0x93 || String.fromCharCode(...new Uint8Array(buffer, 1, 5)) !== 'NUMPY') throw new Error('Not a valid NumPy .npy file.');
   const major = view.getUint8(6);
@@ -321,16 +321,25 @@ export function parseNpy(buffer) {
   if (!valid) throw new Error(`Unsupported NumPy dtype: ${descr}.`);
   const count = shape.reduce((a, b) => a * b, 1);
   const dataOffset = offset + headerLength;
-  if (!Number.isSafeInteger(count) || count > Math.floor((buffer.byteLength - dataOffset) / size)) throw new Error('Truncated or oversized NPY data.');
+  if (!Number.isSafeInteger(count) || count > Math.floor((fileSize - dataOffset) / size)) throw new Error('Truncated or oversized NPY data.');
+  return { shape, dtype: descr, fortran: order === 'True', dataOffset, size, kind, endian };
+}
+
+export function npyReader(buffer, { dtype, kind, size, endian }, dataOffset = 0) {
+  const view = new DataView(buffer);
   const little = endian !== '>';
-  function read(index) {
+  return function read(index) {
     const pos = dataOffset + index * size;
     if (kind === 'f') return size === 2 ? halfToNumber(view.getUint16(pos, little)) : size === 4 ? view.getFloat32(pos, little) : view.getFloat64(pos, little);
     if (kind === 'b' || kind === '?') return view.getUint8(pos) ? 1 : 0;
     if (kind === 'i') return size === 1 ? view.getInt8(pos) : size === 2 ? view.getInt16(pos, little) : size === 4 ? view.getInt32(pos, little) : Number(view.getBigInt64(pos, little));
     return size === 1 ? view.getUint8(pos) : size === 2 ? view.getUint16(pos, little) : size === 4 ? view.getUint32(pos, little) : Number(view.getBigUint64(pos, little));
   }
-  return { shape, dtype: descr, fortran: order === 'True', read };
+}
+
+export function parseNpy(buffer) {
+  const header = parseNpyHeader(buffer);
+  return { ...header, read: npyReader(buffer, header, header.dataOffset) };
 }
 
 export function arrayRaster(array) {

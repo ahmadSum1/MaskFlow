@@ -1,6 +1,7 @@
 import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRule, inFolder, parseNpy, removeFolders, resolveFile } from './core.js';
 import { loadSampleFiles } from './samples.js';
 import { groupBaseRows, pairStatus, visibleDatasetRows } from './dataset-view.js';
+import { defaultSequenceAxes, openNpy, readSequenceFrame } from './sequence.js';
 
 const $ = id => document.getElementById(id);
 const baseCanvas = $('base-canvas');
@@ -27,6 +28,11 @@ let pickerSerial = 0;
 let pickerVersion = 0;
 let pickerFolderMode = null;
 const formatNumber = value => Number(value.toPrecision(5)).toString();
+let sequence = null;
+let sequenceVersion = 0;
+let playbackTimer = null;
+let playing = false;
+let playbackFps = 10;
 
 function showNotice(message) {
   $('notice').textContent = message;
@@ -40,7 +46,11 @@ function setError(message) {
 
 async function loadRaster(info) {
   const file = await resolveFile(info.file);
-  if (info.isNpy) return { type: 'array', ...arrayRaster(parseNpy(await file.arrayBuffer())) };
+  if (info.isNpy) {
+    const header = await openNpy(file);
+    if ([4, 5].includes(header.shape.length)) return { type: 'sequence', file, header };
+    return { type: 'array', ...arrayRaster(parseNpy(await file.arrayBuffer())) };
+  }
   const url = URL.createObjectURL(file);
   try {
     const image = new Image();
@@ -222,6 +232,7 @@ function clearDataset() {
 
 function resetViewer(noMatches) {
   state.request++;
+  clearSequence();
   state.index = -1;
   state.base = null;
   state.mask = null;
@@ -373,6 +384,91 @@ function renderList(ensureSelected = false, scrollOnly = false) {
   list.scrollTop = scrollTop;
 }
 
+function stopPlayback() {
+  playing = false;
+  clearTimeout(playbackTimer);
+  playbackTimer = null;
+  $('frame-play').textContent = 'Play';
+}
+
+function clearSequence() {
+  stopPlayback();
+  sequenceVersion++;
+  sequence = null;
+  $('sequence-controls').hidden = true;
+}
+
+function setupSequence(source) {
+  const { shape } = source.header;
+  const axes = defaultSequenceAxes(shape);
+  sequence = { ...source, axes, frame: 0, extra: 0 };
+  $('sequence-shape').textContent = `Shape: (${shape.join(', ')}). Axis numbers are zero-based.`;
+  for (const role of ['frame', 'height', 'width', 'channel']) {
+    const select = $(`axis-${role}`);
+    select.replaceChildren(...shape.map((size, axis) => new Option(`Axis ${axis} (${size})`, String(axis))));
+    select.value = String(axes[role]);
+  }
+  $('sequence-controls').hidden = false;
+  updateFrameControls();
+}
+
+function extraAxis(shape, axes) {
+  return shape.findIndex((_, axis) => !Object.values(axes).includes(axis));
+}
+
+function updateFrameControls() {
+  if (!sequence) return;
+  const count = sequence.header.shape[sequence.axes.frame];
+  $('frame-number').max = count;
+  $('frame-number').value = sequence.frame + 1;
+  $('frame-total').textContent = `/ ${count}`;
+  $('frame-previous').disabled = sequence.frame === 0;
+  $('frame-next').disabled = sequence.frame === count - 1;
+  const axis = extraAxis(sequence.header.shape, sequence.axes);
+  $('extra-controls').hidden = axis === -1;
+  if (axis !== -1) {
+    const total = sequence.header.shape[axis];
+    $('extra-axis-name').textContent = `Extra axis ${axis}`;
+    $('axis-extra').max = total;
+    $('axis-extra').value = sequence.extra + 1;
+    $('extra-total').textContent = `/ ${total}`;
+    $('extra-previous').disabled = sequence.extra === 0;
+    $('extra-next').disabled = sequence.extra === total - 1;
+  }
+}
+
+async function showFrame(frame) {
+  const current = sequence;
+  if (!current) return;
+  const version = ++sequenceVersion;
+  current.frame = frame;
+  updateFrameControls();
+  $('status').textContent = 'Loading frame…';
+  setError('');
+  try {
+    const raster = await readSequenceFrame(current.file, current.header, current.axes, frame, current.extra, () => version !== sequenceVersion);
+    if (version !== sequenceVersion) return;
+    state.base = { type: 'array', ...raster };
+    render();
+    $('canvas-wrap').hidden = false;
+    $('dimension-badge').textContent = `${raster.width} × ${raster.height}`;
+    $('dimension-badge').hidden = false;
+    $('detail-dimensions').textContent = `${raster.width} × ${raster.height}${state.mask && (raster.width !== state.mask.width || raster.height !== state.mask.height) ? ` / ${state.mask.width} × ${state.mask.height}` : ''}`;
+    const data = state.mask?.type === 'array' ? state.mask : raster;
+    $('detail-range').textContent = `${formatNumber(data.min)} – ${formatNumber(data.max)}`;
+    $('status').textContent = 'Frame loaded';
+    if (playing) {
+      if (frame + 1 >= current.header.shape[current.axes.frame]) stopPlayback();
+      else playbackTimer = setTimeout(() => showFrame(frame + 1), 1000 / playbackFps);
+    }
+  } catch (error) {
+    if (version !== sequenceVersion) return;
+    stopPlayback();
+    $('status').textContent = 'Unable to load frame';
+    setError(`Could not display frame: ${error.message}`);
+  }
+}
+
 async function select(index) {
   if (!state.positions.has(index)) return;
   const ancestors = state.ancestors.get(index) || [];
@@ -381,6 +477,7 @@ async function select(index) {
     rebuildVisibleRows();
   }
   const request = ++state.request;
+  clearSequence();
   state.index = index;
   state.base = null;
   state.mask = null;
@@ -405,6 +502,13 @@ async function select(index) {
   try {
     const [base, mask] = await Promise.all([loadRaster(pair.base), pair.mask ? loadRaster(pair.mask) : null]);
     if (request !== state.request) return;
+    if (mask?.type === 'sequence') throw new Error('Sequence masks are not supported.');
+    if (base.type === 'sequence') {
+      state.mask = mask;
+      setupSequence(base);
+      await showFrame(0);
+      return;
+    }
     state.base = base;
     state.mask = mask;
     render();
@@ -918,7 +1022,7 @@ async function handleMaskSelection(event) {
   const request = state.request;
   const datasetVersion = state.datasetVersion;
   try {
-    await loadRaster(info);
+    if ((await loadRaster(info)).type === 'sequence') throw new Error('Sequence masks are not supported.');
     if (datasetVersion !== state.datasetVersion) return;
     if (state.request !== request || state.pairs[state.index] !== target.pair) {
       showNotice('The selected item changed; the mask was not added. Please try again.');
@@ -1463,6 +1567,61 @@ datasetList.addEventListener('keydown', event => {
 });
 $('opacity').addEventListener('input', () => { $('opacity-value').value = `${$('opacity').value}%`; updateLayerOrder(); });
 $('colormap').addEventListener('change', () => { $('color-ramp').style.background = `linear-gradient(to right, ${colorStops($('colormap').value).join(', ')})`; try { render(); } catch (error) { setError(`Could not render: ${error.message}`); } });
+$('apply-axes').addEventListener('click', () => {
+  if (!sequence) return;
+  stopPlayback();
+  sequenceVersion++;
+  const axes = Object.fromEntries(['frame', 'height', 'width', 'channel'].map(role => [role, Number($(`axis-${role}`).value)]));
+  const shape = sequence.header.shape;
+  const invalid = message => { $('status').textContent = 'Unable to load frame'; setError(message); };
+  if (new Set(Object.values(axes)).size !== 4) return invalid('Choose a different axis for each role.');
+  if (![1, 3, 4].includes(shape[axes.channel])) return invalid('The channel axis must have length 1, 3, or 4.');
+  const previousExtraAxis = extraAxis(shape, sequence.axes);
+  const nextExtraAxis = extraAxis(shape, axes);
+  if (previousExtraAxis !== nextExtraAxis) sequence.extra = 0;
+  sequence.axes = axes;
+  showFrame(0);
+});
+function selectExtra(extra) {
+  if (!sequence) return;
+  const axis = extraAxis(sequence.header.shape, sequence.axes);
+  if (axis === -1) return;
+  const total = sequence.header.shape[axis];
+  if (!Number.isInteger(extra) || extra < 0 || extra >= total) {
+    setError(`Extra axis index must be between 1 and ${total}.`);
+    updateFrameControls();
+    return;
+  }
+  stopPlayback();
+  sequence.extra = extra;
+  showFrame(sequence.frame);
+}
+$('extra-previous').addEventListener('click', () => { if (sequence) selectExtra(sequence.extra - 1); });
+$('extra-next').addEventListener('click', () => { if (sequence) selectExtra(sequence.extra + 1); });
+$('axis-extra').addEventListener('change', () => selectExtra(Number($('axis-extra').value) - 1));
+$('frame-previous').addEventListener('click', () => { if (sequence && sequence.frame > 0) { stopPlayback(); showFrame(sequence.frame - 1); } });
+$('frame-next').addEventListener('click', () => { if (sequence && sequence.frame + 1 < sequence.header.shape[sequence.axes.frame]) { stopPlayback(); showFrame(sequence.frame + 1); } });
+$('frame-number').addEventListener('change', () => {
+  if (!sequence) return;
+  const frame = Number($('frame-number').value) - 1;
+  if (!Number.isInteger(frame) || frame < 0 || frame >= sequence.header.shape[sequence.axes.frame]) {
+    setError(`Frame number must be between 1 and ${sequence.header.shape[sequence.axes.frame]}.`);
+    updateFrameControls();
+    return;
+  }
+  stopPlayback();
+  showFrame(frame);
+});
+$('frame-play').addEventListener('click', () => {
+  if (!sequence) return;
+  if (playing) return stopPlayback();
+  const fps = Number($('frame-fps').value);
+  if (!Number.isInteger(fps) || fps < 1 || fps > 30) return setError('FPS must be an integer between 1 and 30.');
+  playbackFps = fps;
+  playing = true;
+  $('frame-play').textContent = 'Pause';
+  showFrame(sequence.frame + 1 >= sequence.header.shape[sequence.axes.frame] ? 0 : sequence.frame);
+});
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented || $('help-menu').contains(document.activeElement) || ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(document.activeElement.tagName)) return;
   if (event.key === 'ArrowLeft') navigate(-1);
