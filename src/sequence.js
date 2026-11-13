@@ -1,5 +1,10 @@
 import { npyReader, parseNpyHeader } from './core.js';
 
+const MAX_HEADER_BYTES = 1048576;
+const MAX_CONCURRENT_READS = 16;
+const MAX_BATCH_BYTES = 4 * 1024 * 1024;
+
+/** Read and validate an NPY header without loading its array data. */
 export async function openNpy(file) {
   const prefix = await file.slice(0, 12).arrayBuffer();
   if (prefix.byteLength < 10) throw new Error('Truncated NPY header.');
@@ -7,10 +12,11 @@ export async function openNpy(file) {
   const offset = view.getUint8(6) === 1 ? 10 : 12;
   if (prefix.byteLength < offset) throw new Error('Truncated NPY header.');
   const length = offset === 10 ? view.getUint16(8, true) : view.getUint32(8, true);
-  if (length > 1048576 || offset + length > file.size) throw new Error('Invalid NPY header length.');
+  if (length > MAX_HEADER_BYTES || offset + length > file.size) throw new Error('Invalid NPY header length.');
   return parseNpyHeader(await file.slice(0, offset + length).arrayBuffer(), file.size);
 }
 
+/** Return the initial frame, height, width, and channel axis indices for a 4D or 5D shape. */
 export function defaultSequenceAxes(shape) {
   if (shape.length === 4) return { frame: 0, height: 1, width: 2, channel: 3 };
   if (shape.length === 5) return shape[1] === 1536 && shape[2] === 65 && shape[3] === 768 && shape[4] === 3
@@ -19,6 +25,10 @@ export function defaultSequenceAxes(shape) {
   throw new Error('Sequences must have four or five dimensions.');
 }
 
+/**
+ * Read one C-order frame using distinct zero-based frame, height, width and channel axes.
+ * The remaining 5D axis is fixed at the zero-based extra index. `cancelled` is checked between reads.
+ */
 export async function readSequenceFrame(file, header, axes, frame, extra = 0, cancelled = () => false) {
   const { shape, size, dataOffset, fortran } = header;
   if (fortran) throw new Error('Fortran-order sequences are not supported.');
@@ -41,10 +51,12 @@ export async function readSequenceFrame(file, header, axes, frame, extra = 0, ca
   if (!Number.isSafeInteger(totalBytes)) throw new Error('Frame is too large.');
   const data = new Uint8Array(totalBytes);
   const fixedOffset = [...fixed].reduce((n, [axis, value]) => n + value * strides[axis], 0);
-  for (let start = 0; start < blocks; start += 64) {
+  const blockBytes = blockElements * size;
+  const batchSize = Math.max(1, Math.min(MAX_CONCURRENT_READS, Math.floor(MAX_BATCH_BYTES / blockBytes)));
+  for (let start = 0; start < blocks; start += batchSize) {
     if (cancelled()) throw new Error('Frame loading cancelled.');
     const batch = [];
-    for (let i = start; i < Math.min(start + 64, blocks); i++) {
+    for (let i = start; i < Math.min(start + batchSize, blocks); i++) {
       let index = i, element = fixedOffset;
       for (let j = leading.length - 1; j >= 0; j--) {
         const axis = leading[j];
@@ -52,13 +64,13 @@ export async function readSequenceFrame(file, header, axes, frame, extra = 0, ca
         index = Math.floor(index / shape[axis]);
       }
       const begin = dataOffset + element * size;
-      batch.push(file.slice(begin, begin + blockElements * size).arrayBuffer());
+      batch.push(file.slice(begin, begin + blockBytes).arrayBuffer().then(buffer => {
+        if (cancelled()) throw new Error('Frame loading cancelled.');
+        if (buffer.byteLength !== blockBytes) throw new Error('Truncated NPY data.');
+        data.set(new Uint8Array(buffer), i * blockBytes);
+      }));
     }
-    const buffers = await Promise.all(batch);
-    for (let i = 0; i < buffers.length; i++) {
-      if (buffers[i].byteLength !== blockElements * size) throw new Error('Truncated NPY data.');
-      data.set(new Uint8Array(buffers[i]), (start + i) * blockElements * size);
-    }
+    await Promise.all(batch);
   }
   const freeAxes = shape.map((_, axis) => axis).filter(axis => !fixed.has(axis));
   const packedStrides = new Map(freeAxes.map((axis, i) => [axis, freeAxes.slice(i + 1).reduce((n, next) => n * shape[next], 1)]));

@@ -36,6 +36,50 @@ test('extracts noncontiguous five-dimensional frames and supports changing axes'
   assert.deepEqual([...alternate.values], [48, 49, 50, 66, 67, 68, 51, 52, 53, 69, 70, 71]);
 });
 
+test('bounds concurrent reads when extracting a noncontiguous frame', async () => {
+  const blob = fixture([2, 80, 2, 2, 3]);
+  let active = 0, peak = 0;
+  const file = { size: blob.size, slice(start, end) {
+    const part = blob.slice(start, end);
+    return { async arrayBuffer() {
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1));
+        return await part.arrayBuffer();
+      } finally {
+        active--;
+      }
+    } };
+  } };
+  const header = await openNpy(file);
+  peak = 0;
+  const raster = await readSequenceFrame(file, header, defaultSequenceAxes(header.shape), 1, 1);
+  assert.ok(peak <= 16);
+  assert.deepEqual([...raster.values.slice(0, 6)], [198, 199, 200, 201, 202, 203]);
+});
+
+test('limits bytes in flight for larger noncontiguous blocks', async () => {
+  const header = { shape: [1, 6, 2, 1048576, 1], size: 1, dataOffset: 0, fortran: false, dtype: '|u1', kind: 'u', endian: '|' };
+  let activeBytes = 0, peakBytes = 0;
+  const file = { slice(start, end) {
+    return { async arrayBuffer() {
+      const length = end - start;
+      activeBytes += length;
+      peakBytes = Math.max(peakBytes, activeBytes);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1));
+        return new ArrayBuffer(length);
+      } finally {
+        activeBytes -= length;
+      }
+    } };
+  } };
+  const raster = await readSequenceFrame(file, header, defaultSequenceAxes(header.shape), 1);
+  assert.ok(peakBytes <= 4 * 1024 * 1024);
+  assert.deepEqual([raster.width, raster.height, raster.min, raster.max], [1048576, 6, 0, 0]);
+});
+
 test('uses the video training shape as width by height and changes the clip axis', async () => {
   const axes = defaultSequenceAxes([3, 1536, 65, 768, 3]);
   assert.deepEqual(axes, { frame: 2, height: 3, width: 1, channel: 4 });

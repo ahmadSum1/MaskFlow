@@ -1,4 +1,4 @@
-import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRule, inFolder, parseNpy, removeFolders, resolveFile } from './core.js';
+import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRule, inFolder, npyReader, removeFolders, resolveFile } from './core.js';
 import { loadSampleFiles } from './samples.js';
 import { groupBaseRows, pairStatus, visibleDatasetRows } from './dataset-view.js';
 import { defaultSequenceAxes, openNpy, readSequenceFrame } from './sequence.js';
@@ -49,7 +49,9 @@ async function loadRaster(info) {
   if (info.isNpy) {
     const header = await openNpy(file);
     if ([4, 5].includes(header.shape.length)) return { type: 'sequence', file, header };
-    return { type: 'array', ...arrayRaster(parseNpy(await file.arrayBuffer())) };
+    const buffer = await file.arrayBuffer();
+    if (buffer.byteLength !== file.size) throw new Error('Truncated NPY data.');
+    return { type: 'array', ...arrayRaster({ ...header, read: npyReader(buffer, header, header.dataOffset) }) };
   }
   const url = URL.createObjectURL(file);
   try {
@@ -389,6 +391,7 @@ function stopPlayback() {
   clearTimeout(playbackTimer);
   playbackTimer = null;
   $('frame-play').textContent = 'Play';
+  $('frame-play').setAttribute('aria-pressed', 'false');
 }
 
 function clearSequence() {
@@ -1620,6 +1623,7 @@ $('frame-play').addEventListener('click', () => {
   playbackFps = fps;
   playing = true;
   $('frame-play').textContent = 'Pause';
+  $('frame-play').setAttribute('aria-pressed', 'true');
   showFrame(sequence.frame + 1 >= sequence.header.shape[sequence.axes.frame] ? 0 : sequence.frame);
 });
 document.addEventListener('keydown', event => {
