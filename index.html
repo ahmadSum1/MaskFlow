@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#11131a">
   <meta name="description" content="A private, browser-based viewer for NumPy arrays and segmentation masks.">
   <title>MaskFlow — Visualize what matters</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=3">
 </head>
 <body>
   <header class="topbar">
@@ -37,7 +37,7 @@
         <label class="view-switch"><span>Group by pair status</span><input id="group-items" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Tree view</span><input id="tree-toggle" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
       </div>
-      <details id="advanced-menu" class="advanced-menu" hidden><summary>Advanced</summary><div><button id="match-loaded" class="button button-outline" type="button">Match loaded folders</button><button id="remove-folders" class="button button-outline" type="button">Remove folders</button></div></details>
+      <details id="advanced-menu" class="advanced-menu" hidden><summary>Advanced</summary><div><button id="match-loaded" class="button button-outline" type="button">Match loaded folders</button><button id="remove-folders" class="button button-outline" type="button">Remove folders</button><div class="cache-setting"><label for="frame-cache-limit">Frame cache limit (MiB)</label><input id="frame-cache-limit" type="number" min="1" max="8589934591" step="1" value="256" aria-describedby="frame-cache-hint frame-cache-error"><p id="frame-cache-hint">Cached frames only; decoding and display use additional RAM.</p><p id="frame-cache-error" role="alert" hidden></p></div></div></details>
       <div id="busy-indicator" class="busy-indicator" hidden><div class="busy-status" role="status"><span class="spinner" aria-hidden="true"></span><span id="busy-message"></span></div><div id="picker-recovery" class="picker-recovery" hidden><span>If the picker is closed but this message remains:</span><button id="reset-picker" type="button">Stop waiting</button><button id="fallback-picker" type="button" hidden>Try alternative folder picker</button></div></div>
       <div id="view-status" class="view-status" role="status"></div>
       <div class="dataset-label"><span>FILES &amp; PAIRS</span><span id="pair-summary">0 items</span></div>
@@ -60,9 +60,16 @@
             <div class="empty-actions"><button id="empty-folder" class="button button-primary"><span aria-hidden="true">▱</span> Load a folder <span aria-hidden="true">↗</span></button><button id="empty-files" class="button button-ghost">Load files</button></div>
             <div class="supported">SUPPORTS <span>.NPY</span> <span>.PNG</span> <span>.JPG</span> <span>.WEBP</span> <span>+ MORE</span></div>
           </div>
-          <div id="canvas-wrap" class="canvas-wrap" hidden><div id="canvas-stack" class="canvas-stack"><canvas id="base-canvas"></canvas><canvas id="mask-canvas"></canvas></div></div>
+          <div id="canvas-wrap" class="canvas-wrap" hidden><div id="canvas-stack" class="canvas-stack"><canvas id="base-canvas"></canvas><canvas id="mask-canvas"></canvas></div><div class="zoom-controls" role="group" aria-label="Image zoom"><button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><output id="zoom-value" aria-live="polite">100%</output><button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in">＋</button><button id="zoom-fit" type="button" aria-label="Fit to view" title="Fit to view">Fit</button></div></div>
           <div id="no-matches" class="empty-state" hidden><h2>No matching items.</h2><p>Change the filter to see more files.</p></div>
           <div id="error-message" class="error-message" role="alert" hidden></div>
+        </div>
+        <div id="sequence-controls" class="sequence-controls" hidden>
+          <div class="sequence-navigation"><strong>Frames</strong><button id="frame-previous" class="nav-button" type="button" aria-label="Previous frame">←</button><button id="frame-play" class="button button-outline" type="button" aria-label="Play frames" aria-pressed="false">Play</button><button id="frame-next" class="nav-button" type="button" aria-label="Next frame">→</button><label>Frame <input id="frame-number" type="number" min="1" step="1"></label><span id="frame-total"></span><label>FPS <input id="frame-fps" type="number" min="1" max="30" step="1" value="10"></label></div>
+          <div id="extra-controls" hidden></div>
+          <details><summary>Array axes</summary><p id="sequence-shape"></p><p>Choose distinct axes and apply. The remaining axis is controlled above. Axis numbers are zero-based; frame and extra-axis indices start at 1.</p>
+            <div class="sequence-axes"><label>Frame <select id="axis-frame"></select></label><label>Height <select id="axis-height"></select></label><label>Width <select id="axis-width"></select></label><label>Channels <select id="axis-channel"></select></label><button id="apply-axes" class="button button-outline" type="button">Apply axes</button></div>
+          </details>
         </div>
         <div class="viewer-bottom"><div><span class="keyboard">←</span><span class="keyboard">→</span> <span class="viewer-hint">to navigate</span></div><div class="navigation"><button id="previous" class="nav-button" aria-label="Previous item" disabled>←</button><input id="jump-index" type="number" min="1" step="1" aria-label="Go to item number" aria-describedby="index-error" disabled><span>/ <span id="position">0</span></span><button id="next" class="nav-button" aria-label="Next item" disabled>→</button></div><div class="viewer-bottom-right">BUILT FOR EXPLORATION <span>✳</span></div></div>
       </div>
@@ -75,6 +82,7 @@
       <div class="inspector-heading"><div class="eyebrow">MAKE IT YOURS</div><h2>Display settings</h2><p>Fine-tune your view in real time.</p></div>
       <div class="settings-section"><div class="section-title"><span class="section-icon">◐</span> Overlay <span class="section-number">01</span></div>
         <label class="input-label" for="mask-select">MASK / GROUND TRUTH</label><div class="select-wrap"><select id="mask-select" disabled><option>No mask selected</option></select></div>
+        <label class="mask-match-option"><input id="match-mask-size" type="checkbox" checked disabled><span>Match mask to base image</span></label><p class="mask-match-hint">Stretches to the base dimensions; turn off to preserve the mask's aspect ratio.</p>
         <div class="mask-actions"><button id="add-mask" class="button button-outline" disabled>Add mask</button><button id="replace-mask" class="button button-outline" disabled>Replace mask</button></div>
         <button id="swap-layers" class="button button-outline swap-button" disabled>⇅ Swap front / back</button><p id="layer-order" class="layer-order">Select a mask to arrange layers.</p>
         <div class="setting-row"><label for="opacity">Front layer opacity</label><output id="opacity-value" for="opacity">60%</output></div><input id="opacity" type="range" min="0" max="100" value="60"><div class="range-labels"><span>TRANSPARENT</span><span>OPAQUE</span></div></div>
@@ -87,6 +95,8 @@
     <strong id="file-menu-name"></strong>
     <button id="copy-file-name" type="button">Copy file name</button>
     <button id="copy-file-path" type="button">Copy relative path</button>
+    <button id="copy-file-metadata" type="button" hidden>Copy metadata</button>
+    <div id="file-menu-separator" style="border-top: 1px solid #454a52; margin: 4px 0;" hidden></div>
     <button type="button" disabled>Open folder in Explorer</button>
     <p id="file-menu-note">Browsers cannot reveal local folders or access absolute paths.</p>
   </div>

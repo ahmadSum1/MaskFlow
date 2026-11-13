@@ -15,10 +15,15 @@ function npy(shape, version = 1) {
 }
 
 test('reads NumPy spatial dimensions without array data', async () => {
+  assert.deepEqual(await readDimensions(npy('')), { width: 1, height: 1 });
+  assert.deepEqual(await readDimensions(npy('7')), { width: 7, height: 1 });
   assert.deepEqual(await readDimensions(npy('10, 20')), { width: 20, height: 10 });
   assert.deepEqual(await readDimensions(npy('3, 10, 20', 2)), { width: 20, height: 10 });
   assert.deepEqual(await readDimensions(npy('3, 10, 4', 3)), { width: 10, height: 3 });
-  await assert.rejects(readDimensions(npy('2, 10, 20')), /Unsupported NPY shape/);
+  assert.deepEqual(await readDimensions(npy('2, 10, 20, 3')), { width: 20, height: 10 });
+  assert.deepEqual(await readDimensions(npy('2, 10, 3, 20, 3')), { width: 20, height: 10 });
+  assert.deepEqual(await readDimensions(npy('2, 3, 4, 5, 6, 3')), { width: 6, height: 5 });
+  assert.deepEqual(await readDimensions(npy('2, 10, 20')), { width: 20, height: 10 });
 });
 
 test('reads image header dimensions', async () => {

@@ -1,16 +1,28 @@
-import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRule, inFolder, parseNpy, removeFolders, resolveFile } from './core.js';
+import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRule, inFolder, npyReader, removeFolders, resolveFile } from './core.js';
 import { loadSampleFiles } from './samples.js';
 import { groupBaseRows, pairStatus, visibleDatasetRows } from './dataset-view.js';
+import { defaultSequenceAxes, openNpy } from './sequence.js';
+import { DEFAULT_CACHE_BYTES, SequenceFrameCache } from './sequence-cache.js';
+import { extractMetadata, formatMetadata } from './metadata.js';
 
 const $ = id => document.getElementById(id);
 const baseCanvas = $('base-canvas');
 const maskCanvas = $('mask-canvas');
+const canvasWrap = $('canvas-wrap');
+const canvasStack = $('canvas-stack');
 const state = { pairs: [], maskGroups: new Map(), index: -1, base: null, mask: null, request: 0, datasetVersion: 0, inputVersion: 0, pickerOpen: false, sampleLoading: false, indexing: false, indexMessage: '', viewLoading: false, cancelIndex: null, viewVersion: 0, cancelView: null, rows: [], visibleRows: [], navigation: [], positions: new Map(), rowPositions: new Map(), ancestors: new Map(), collapsed: new Set(), expandedBases: new Set(), dimensions: new WeakMap() };
 const ROW_HEIGHT = 61;
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 8;
 let maskTarget = null;
 let renderedRange = null;
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+let panPointer = null;
 let contextInfo = null;
 let contextOrigin = null;
+let metadataRequest = 0;
 let addFolderMode = 'dataset';
 let addFolderMatch = null;
 let nextSourceId = 1;
@@ -27,6 +39,14 @@ let pickerSerial = 0;
 let pickerVersion = 0;
 let pickerFolderMode = null;
 const formatNumber = value => Number(value.toPrecision(5)).toString();
+let sequence = null;
+let sequenceVersion = 0;
+let playbackTimer = null;
+let playing = false;
+let playbackFps = 10;
+const MIB = 1024 * 1024;
+const CACHE_LIMIT_KEY = 'maskflow-frame-cache-mib';
+let cacheLimitBytes = DEFAULT_CACHE_BYTES;
 
 function showNotice(message) {
   $('notice').textContent = message;
@@ -38,9 +58,88 @@ function setError(message) {
   $('error-message').hidden = !message;
 }
 
+function cacheLimitError(message) {
+  $('frame-cache-error').textContent = message;
+  $('frame-cache-error').hidden = !message;
+}
+
+function parseCacheLimit(value) {
+  const mib = Number(value);
+  const bytes = mib * MIB;
+  return value.trim() !== '' && Number.isSafeInteger(mib) && mib >= 1 && Number.isSafeInteger(bytes) ? bytes : null;
+}
+
+try {
+  const saved = localStorage.getItem(CACHE_LIMIT_KEY);
+  if (saved !== null) {
+    const bytes = parseCacheLimit(saved);
+    if (bytes === null) cacheLimitError('Saved frame cache limit is invalid; using 256 MiB.');
+    else cacheLimitBytes = bytes;
+  }
+} catch (error) {
+  cacheLimitError(`Could not restore the frame cache limit: ${error.message}`);
+}
+$('frame-cache-limit').value = cacheLimitBytes / MIB;
+$('frame-cache-limit').addEventListener('change', event => {
+  const input = event.currentTarget;
+  const bytes = parseCacheLimit(input.value);
+  if (bytes === null) {
+    input.setAttribute('aria-invalid', 'true');
+    cacheLimitError('Enter a whole number of MiB between 1 and 8589934591.');
+    return;
+  }
+  input.removeAttribute('aria-invalid');
+  cacheLimitBytes = bytes;
+  sequence?.cache.setLimit(bytes);
+  try {
+    localStorage.setItem(CACHE_LIMIT_KEY, String(bytes / MIB));
+    cacheLimitError('');
+  } catch (error) {
+    cacheLimitError(`Limit applied for this tab, but could not be saved: ${error.message}`);
+  }
+});
+
+function updateZoom() {
+  canvasStack.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  canvasWrap.classList.toggle('zoomed', zoom > 1);
+  $('zoom-value').textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function setZoom(next, point = null) {
+  const updated = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next));
+  if (point) {
+    const bounds = canvasWrap.getBoundingClientRect();
+    const x = point.x - bounds.left - bounds.width / 2;
+    const y = point.y - bounds.top - bounds.height / 2;
+    panX = x - (x - panX) * updated / zoom;
+    panY = y - (y - panY) * updated / zoom;
+  } else {
+    panX *= updated / zoom;
+    panY *= updated / zoom;
+  }
+  zoom = updated;
+  if (zoom === 1) { panX = 0; panY = 0; }
+  updateZoom();
+}
+
+function resetZoom() {
+  zoom = 1;
+  panX = 0;
+  panY = 0;
+  updateZoom();
+}
+
 async function loadRaster(info) {
   const file = await resolveFile(info.file);
-  if (info.isNpy) return { type: 'array', ...arrayRaster(parseNpy(await file.arrayBuffer())) };
+  if (info.isNpy) {
+    const header = await openNpy(file);
+    const shape = header.shape;
+    const isUnchannelledVolume = shape.length === 3 && ![1, 3, 4].includes(shape[0]) && ![1, 3, 4].includes(shape[2]);
+    if (shape.length >= 4 || isUnchannelledVolume) return { type: 'sequence', file, header };
+    const buffer = await file.arrayBuffer();
+    if (buffer.byteLength !== file.size) throw new Error('Truncated NPY data.');
+    return { type: 'array', ...arrayRaster({ ...header, read: npyReader(buffer, header, header.dataOffset) }) };
+  }
   const url = URL.createObjectURL(file);
   try {
     const image = new Image();
@@ -105,6 +204,7 @@ function render() {
   paintRaster(baseCanvas, state.base, false);
   if (state.mask) paintRaster(maskCanvas, state.mask, true);
   maskCanvas.hidden = !state.mask;
+  canvasStack.classList.toggle('match-mask-size', $('match-mask-size').checked);
   updateLayerOrder();
   $('color-ramp').style.background = `linear-gradient(to right, ${colorStops($('colormap').value).join(', ')})`;
 }
@@ -129,6 +229,7 @@ function updateMaskControls() {
   $('add-mask').disabled = busy || !pair;
   $('replace-mask').disabled = busy || !pair?.mask;
   $('swap-layers').disabled = !pair?.mask;
+  $('match-mask-size').disabled = !pair?.mask;
   if (!pair?.mask) {
     selectMask.add(new Option('No mask selected', ''));
     selectMask.disabled = true;
@@ -222,6 +323,8 @@ function clearDataset() {
 
 function resetViewer(noMatches) {
   state.request++;
+  clearSequence();
+  resetZoom();
   state.index = -1;
   state.base = null;
   state.mask = null;
@@ -373,18 +476,152 @@ function renderList(ensureSelected = false, scrollOnly = false) {
   list.scrollTop = scrollTop;
 }
 
+function stopPlayback() {
+  playing = false;
+  clearTimeout(playbackTimer);
+  playbackTimer = null;
+  $('frame-play').textContent = 'Play';
+  $('frame-play').setAttribute('aria-pressed', 'false');
+}
+
+function clearSequence() {
+  stopPlayback();
+  sequenceVersion++;
+  sequence?.cache.dispose();
+  sequence = null;
+  $('sequence-controls').hidden = true;
+}
+
+function setupSequence(source, previous = null) {
+  const { shape } = source.header;
+  const axes = previous?.axes || defaultSequenceAxes(shape);
+  const cache = new SequenceFrameCache(source.file, source.header);
+  cache.setLimit(cacheLimitBytes);
+  sequence = { ...source, axes, frame: previous?.frame ?? 0, extra: previous?.extra ?? {}, cache };
+  $('sequence-shape').textContent = `Shape: (${shape.join(', ')}). Axis numbers are zero-based.`;
+  for (const role of ['frame', 'height', 'width', 'channel']) {
+    const select = $(`axis-${role}`);
+    select.replaceChildren(...(role === 'channel' ? [new Option('None', '')] : []), ...shape.map((size, axis) => new Option(`Axis ${axis} (${size})`, String(axis))));
+    select.value = axes[role] === null ? '' : String(axes[role]);
+  }
+  renderExtraAxisControls();
+  $('sequence-controls').hidden = false;
+  updateFrameControls();
+}
+
+function extraAxes(shape, axes) {
+  const used = new Set(Object.values(axes).filter(axis => axis !== null));
+  return shape.map((_, axis) => axis).filter(axis => !used.has(axis));
+}
+
+function renderExtraAxisControls() {
+  const container = $('extra-controls');
+  container.replaceChildren();
+  if (!sequence) return;
+  for (const axis of extraAxes(sequence.header.shape, sequence.axes)) {
+    const row = document.createElement('div');
+    row.className = 'sequence-navigation sequence-extra';
+    const label = document.createElement('span');
+    label.textContent = `Axis ${axis} (${sequence.header.shape[axis]})`;
+    const previous = document.createElement('button');
+    previous.className = 'nav-button';
+    previous.type = 'button';
+    previous.dataset.axis = axis;
+    previous.dataset.direction = '-1';
+    previous.setAttribute('aria-label', `Previous index for axis ${axis}`);
+    previous.textContent = '←';
+    const inputLabel = document.createElement('label');
+    inputLabel.textContent = 'Index ';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.step = '1';
+    input.max = sequence.header.shape[axis];
+    input.value = (sequence.extra[axis] ?? 0) + 1;
+    input.dataset.axis = axis;
+    inputLabel.append(input);
+    const total = document.createElement('span');
+    total.textContent = `/ ${sequence.header.shape[axis]}`;
+    const next = document.createElement('button');
+    next.className = 'nav-button';
+    next.type = 'button';
+    next.dataset.axis = axis;
+    next.dataset.direction = '1';
+    next.setAttribute('aria-label', `Next index for axis ${axis}`);
+    next.textContent = '→';
+    row.append(label, previous, inputLabel, total, next);
+    container.append(row);
+  }
+  container.hidden = !container.childElementCount;
+}
+
+function updateFrameControls() {
+  if (!sequence) return;
+  const count = sequence.header.shape[sequence.axes.frame];
+  $('frame-number').max = count;
+  $('frame-number').value = sequence.frame + 1;
+  $('frame-total').textContent = `/ ${count}`;
+  $('frame-previous').disabled = sequence.frame === 0;
+  $('frame-next').disabled = sequence.frame === count - 1;
+  for (const button of $('extra-controls').querySelectorAll('button[data-axis]')) {
+    const axis = Number(button.dataset.axis);
+    const index = sequence.extra[axis] ?? 0;
+    button.disabled = button.dataset.direction === '-1' ? index === 0 : index === sequence.header.shape[axis] - 1;
+  }
+  for (const input of $('extra-controls').querySelectorAll('input[data-axis]')) {
+    input.value = (sequence.extra[Number(input.dataset.axis)] ?? 0) + 1;
+  }
+}
+
+async function showFrame(frame) {
+  const current = sequence;
+  if (!current) return;
+  const version = ++sequenceVersion;
+  current.frame = frame;
+  updateFrameControls();
+  $('status').textContent = 'Loading frame…';
+  setError('');
+  try {
+    const raster = await current.cache.getFrame(current.axes, frame, current.extra);
+    if (version !== sequenceVersion) return;
+    state.base = { type: 'array', ...raster };
+    render();
+    $('canvas-wrap').hidden = false;
+    $('dimension-badge').textContent = `${raster.width} × ${raster.height}`;
+    $('dimension-badge').hidden = false;
+    $('detail-dimensions').textContent = `${raster.width} × ${raster.height}${state.mask && (raster.width !== state.mask.width || raster.height !== state.mask.height) ? ` / ${state.mask.width} × ${state.mask.height}` : ''}`;
+    const data = state.mask?.type === 'array' ? state.mask : raster;
+    $('detail-range').textContent = `${formatNumber(data.min)} – ${formatNumber(data.max)}`;
+    $('status').textContent = 'Frame loaded';
+    if (playing) {
+      if (frame + 1 >= current.header.shape[current.axes.frame]) stopPlayback();
+      else playbackTimer = setTimeout(() => showFrame(frame + 1), 1000 / playbackFps);
+    }
+  } catch (error) {
+    if (version !== sequenceVersion) return;
+    stopPlayback();
+    $('status').textContent = 'Unable to load frame';
+    setError(`Could not display frame: ${error.message}`);
+  }
+}
+
 async function select(index) {
   if (!state.positions.has(index)) return;
+  const pair = state.pairs[index];
+  const currentPair = state.pairs[state.index];
+  const previousSequence = sequence && currentPair?.base.file === pair.base.file
+    ? { axes: { ...sequence.axes }, frame: sequence.frame, extra: { ...sequence.extra } }
+    : null;
   const ancestors = state.ancestors.get(index) || [];
   if (ancestors.some(key => state.collapsed.has(key))) {
     for (const key of ancestors) state.collapsed.delete(key);
     rebuildVisibleRows();
   }
   const request = ++state.request;
+  clearSequence();
   state.index = index;
   state.base = null;
   state.mask = null;
-  const pair = state.pairs[index];
   renderList(true);
   updateMaskControls();
   $('viewer-name').textContent = pair.base.name;
@@ -405,6 +642,13 @@ async function select(index) {
   try {
     const [base, mask] = await Promise.all([loadRaster(pair.base), pair.mask ? loadRaster(pair.mask) : null]);
     if (request !== state.request) return;
+    if (mask?.type === 'sequence') throw new Error('Sequence masks are not supported.');
+    if (base.type === 'sequence') {
+      state.mask = mask;
+      setupSequence(base, previousSequence);
+      await showFrame(previousSequence?.frame ?? 0);
+      return;
+    }
     state.base = base;
     state.mask = mask;
     render();
@@ -918,7 +1162,7 @@ async function handleMaskSelection(event) {
   const request = state.request;
   const datasetVersion = state.datasetVersion;
   try {
-    await loadRaster(info);
+    if ((await loadRaster(info)).type === 'sequence') throw new Error('Sequence masks are not supported.');
     if (datasetVersion !== state.datasetVersion) return;
     if (state.request !== request || state.pairs[state.index] !== target.pair) {
       showNotice('The selected item changed; the mask was not added. Please try again.');
@@ -1345,6 +1589,9 @@ $('remove-form').addEventListener('submit', event => {
   showNotice('Selected folders removed from the viewer; local files were not changed.');
 });
 $('mask-select').addEventListener('change', event => select(Number(event.target.value)));
+$('match-mask-size').addEventListener('change', event => {
+  canvasStack.classList.toggle('match-mask-size', event.target.checked);
+});
 $('swap-layers').addEventListener('click', () => {
   const pair = state.pairs[state.index];
   if (!pair?.mask) return;
@@ -1383,6 +1630,10 @@ const fileMenu = $('file-menu');
 function closeFileMenu(restoreFocus = false) {
   fileMenu.hidden = true;
   if (restoreFocus && contextOrigin?.isConnected) contextOrigin.focus({ preventScroll: true });
+  metadataRequest++;
+  $('copy-file-metadata').hidden = true;
+  $('copy-file-metadata').dataset.metadata = '';
+  $('file-menu-separator').hidden = true;
   contextInfo = null;
   contextOrigin = null;
 }
@@ -1396,11 +1647,34 @@ datasetList.addEventListener('contextmenu', event => {
   event.preventDefault();
   contextInfo = info;
   contextOrigin = item;
+  const request = ++metadataRequest;
+  $('copy-file-metadata').hidden = true;
+  $('copy-file-metadata').dataset.metadata = '';
+  $('file-menu-separator').hidden = true;
   $('file-menu-name').textContent = info.name;
   $('file-menu-name').title = info.path;
   const hasPath = info.path !== info.name;
   $('copy-file-path').disabled = !hasPath;
   $('file-menu-note').textContent = `${hasPath ? '' : 'No relative path is available for this file. '}Browsers cannot reveal local folders or access absolute paths.`;
+  
+  resolveFile(info.file).then(file => extractMetadata(file)).then(metadata => {
+    if (request !== metadataRequest || contextInfo !== info) return;
+    if (metadata) {
+      metadata.filename = info.path;
+      $('copy-file-metadata').hidden = false;
+      $('file-menu-separator').hidden = false;
+      $('copy-file-metadata').dataset.metadata = JSON.stringify(metadata);
+    } else {
+      $('copy-file-metadata').hidden = true;
+      $('file-menu-separator').hidden = true;
+    }
+  }).catch(error => {
+    if (request !== metadataRequest || contextInfo !== info) return;
+    console.error('Error extracting metadata:', error);
+    $('copy-file-metadata').hidden = true;
+    $('file-menu-separator').hidden = true;
+  });
+  
   fileMenu.hidden = false;
   const rect = item.getBoundingClientRect();
   const x = event.clientX || rect.left;
@@ -1420,6 +1694,21 @@ for (const [id, property, description] of [['copy-file-name', 'name', 'File name
     if (datasetVersion === state.datasetVersion) showNotice(`${description} copied.`);
   } catch (error) {
     if (datasetVersion === state.datasetVersion) showNotice(`Could not copy ${description.toLowerCase()}: ${error.message}`);
+  }
+});
+
+$('copy-file-metadata').addEventListener('click', async () => {
+  if (!contextInfo || !$('copy-file-metadata').dataset.metadata) return;
+  const datasetVersion = state.datasetVersion;
+  const metadata = JSON.parse($('copy-file-metadata').dataset.metadata);
+  const formattedMetadata = formatMetadata(metadata);
+  closeFileMenu(true);
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable; use HTTPS or localhost.');
+    await navigator.clipboard.writeText(formattedMetadata);
+    if (datasetVersion === state.datasetVersion) showNotice('Metadata copied.');
+  } catch (error) {
+    if (datasetVersion === state.datasetVersion) showNotice(`Could not copy metadata: ${error.message}`);
   }
 });
 document.addEventListener('pointerdown', event => {
@@ -1462,7 +1751,100 @@ datasetList.addEventListener('keydown', event => {
   datasetList.focus({ preventScroll: true });
 });
 $('opacity').addEventListener('input', () => { $('opacity-value').value = `${$('opacity').value}%`; updateLayerOrder(); });
+$('zoom-in').addEventListener('click', () => setZoom(zoom * 1.25));
+$('zoom-out').addEventListener('click', () => setZoom(zoom / 1.25));
+$('zoom-fit').addEventListener('click', resetZoom);
+canvasWrap.addEventListener('wheel', event => {
+  if (event.target.closest?.('.zoom-controls')) return;
+  event.preventDefault();
+  setZoom(zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX, y: event.clientY });
+}, { passive: false });
+canvasWrap.addEventListener('pointerdown', event => {
+  if (zoom <= 1 || event.target.closest?.('.zoom-controls') || event.button !== 0) return;
+  panPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, panX, panY };
+  canvasWrap.classList.add('panning');
+  canvasWrap.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+canvasWrap.addEventListener('pointermove', event => {
+  if (!panPointer || panPointer.id !== event.pointerId) return;
+  panX = panPointer.panX + event.clientX - panPointer.x;
+  panY = panPointer.panY + event.clientY - panPointer.y;
+  updateZoom();
+});
+function finishPanning(event) {
+  if (!panPointer || panPointer.id !== event.pointerId) return;
+  panPointer = null;
+  canvasWrap.classList.remove('panning');
+  if (canvasWrap.hasPointerCapture(event.pointerId)) canvasWrap.releasePointerCapture(event.pointerId);
+}
+canvasWrap.addEventListener('pointerup', finishPanning);
+canvasWrap.addEventListener('pointercancel', finishPanning);
 $('colormap').addEventListener('change', () => { $('color-ramp').style.background = `linear-gradient(to right, ${colorStops($('colormap').value).join(', ')})`; try { render(); } catch (error) { setError(`Could not render: ${error.message}`); } });
+$('apply-axes').addEventListener('click', () => {
+  if (!sequence) return;
+  stopPlayback();
+  sequenceVersion++;
+  const axes = Object.fromEntries(['frame', 'height', 'width', 'channel'].map(role => {
+    const value = $(`axis-${role}`).value;
+    return [role, value === '' ? null : Number(value)];
+  }));
+  const shape = sequence.header.shape;
+  const invalid = message => { $('status').textContent = 'Unable to load frame'; setError(message); };
+  const assigned = Object.values(axes).filter(axis => axis !== null);
+  if (new Set(assigned).size !== assigned.length) return invalid('Choose a different axis for each role.');
+  if (axes.channel !== null && ![1, 3, 4].includes(shape[axes.channel])) return invalid('The channel axis must have length 1, 3, or 4.');
+  sequence.axes = axes;
+  sequence.extra = Object.fromEntries(extraAxes(shape, axes).map(axis => [axis, sequence.extra[axis] ?? 0]));
+  renderExtraAxisControls();
+  showFrame(0);
+});
+function selectExtra(axis, extra) {
+  if (!sequence) return;
+  const total = sequence.header.shape[axis];
+  if (!Number.isInteger(extra) || extra < 0 || extra >= total) {
+    setError(`Extra axis index must be between 1 and ${total}.`);
+    updateFrameControls();
+    return;
+  }
+  stopPlayback();
+  sequence.extra[axis] = extra;
+  showFrame(sequence.frame);
+}
+$('extra-controls').addEventListener('click', event => {
+  const button = event.target.closest('button[data-axis]');
+  if (!button || !sequence) return;
+  const axis = Number(button.dataset.axis);
+  selectExtra(axis, (sequence.extra[axis] ?? 0) + Number(button.dataset.direction));
+});
+$('extra-controls').addEventListener('change', event => {
+  const input = event.target.closest('input[data-axis]');
+  if (input) selectExtra(Number(input.dataset.axis), Number(input.value) - 1);
+});
+$('frame-previous').addEventListener('click', () => { if (sequence && sequence.frame > 0) { stopPlayback(); showFrame(sequence.frame - 1); } });
+$('frame-next').addEventListener('click', () => { if (sequence && sequence.frame + 1 < sequence.header.shape[sequence.axes.frame]) { stopPlayback(); showFrame(sequence.frame + 1); } });
+$('frame-number').addEventListener('change', () => {
+  if (!sequence) return;
+  const frame = Number($('frame-number').value) - 1;
+  if (!Number.isInteger(frame) || frame < 0 || frame >= sequence.header.shape[sequence.axes.frame]) {
+    setError(`Frame number must be between 1 and ${sequence.header.shape[sequence.axes.frame]}.`);
+    updateFrameControls();
+    return;
+  }
+  stopPlayback();
+  showFrame(frame);
+});
+$('frame-play').addEventListener('click', () => {
+  if (!sequence) return;
+  if (playing) return stopPlayback();
+  const fps = Number($('frame-fps').value);
+  if (!Number.isInteger(fps) || fps < 1 || fps > 30) return setError('FPS must be an integer between 1 and 30.');
+  playbackFps = fps;
+  playing = true;
+  $('frame-play').textContent = 'Pause';
+  $('frame-play').setAttribute('aria-pressed', 'true');
+  showFrame(sequence.frame + 1 >= sequence.header.shape[sequence.axes.frame] ? 0 : sequence.frame);
+});
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented || $('help-menu').contains(document.activeElement) || ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(document.activeElement.tagName)) return;
   if (event.key === 'ArrowLeft') navigate(-1);
