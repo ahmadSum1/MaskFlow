@@ -301,10 +301,19 @@ test('decodes float16 and excludes non-finite values from range', () => {
   assert.equal(raster.max, 1);
 });
 
+test('views scalar and vector arrays as compact rasters', () => {
+  const scalar = arrayRaster(parseNpy(npy([], '|u1', [7])));
+  assert.deepEqual([scalar.width, scalar.height, scalar.channels], [1, 1, 1]);
+  assert.deepEqual([...scalar.values], [7]);
+  const vector = arrayRaster(parseNpy(npy([4], '|u1', [1, 2, 3, 4])));
+  assert.deepEqual([vector.width, vector.height, vector.channels], [4, 1, 1]);
+  assert.deepEqual([...vector.values], [1, 2, 3, 4]);
+});
+
 test('reports malformed data and unsupported shapes and dtypes', () => {
   assert.throws(() => parseNpy(new ArrayBuffer(4)), /valid NumPy/);
   assert.throws(() => parseNpy(npy([2, 2], '|u1', [1, 2])), /Truncated/);
-  assert.throws(() => arrayRaster(parseNpy(npy([4], '|u1', [1, 2, 3, 4]))), /Unsupported array shape/);
+  assert.throws(() => arrayRaster(parseNpy(npy([2, 3, 5], '|u1', Array(30).fill(1)))), /Unsupported array shape/);
   assert.throws(() => parseNpy(npy([1, 1], '<c8', [1])), /Unsupported NumPy dtype/);
 });
 

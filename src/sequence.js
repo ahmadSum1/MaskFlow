@@ -16,41 +16,59 @@ export async function openNpy(file) {
   return parseNpyHeader(await file.slice(0, offset + length).arrayBuffer(), file.size);
 }
 
-/** Return the initial frame, height, width, and channel axis indices for a 4D or 5D shape. */
+/** Return the initial frame, height, width, and optional channel axes for a sequence shape. */
 export function defaultSequenceAxes(shape) {
+  if (shape.length === 3) return { frame: 0, height: 1, width: 2, channel: null };
   if (shape.length === 4) return { frame: 0, height: 1, width: 2, channel: 3 };
   if (shape.length === 5) return shape[1] === 1536 && shape[2] === 65 && shape[3] === 768 && shape[4] === 3
     ? { frame: 2, height: 3, width: 1, channel: 4 }
     : { frame: 2, height: 1, width: 3, channel: 4 };
-  throw new Error('Sequences must have four or five dimensions.');
+  if (shape.length > 5) {
+    const channel = [1, 3, 4].includes(shape.at(-1)) ? shape.length - 1 : null;
+    return channel === null
+      ? { frame: 0, height: shape.length - 2, width: shape.length - 1, channel }
+      : { frame: 0, height: shape.length - 3, width: shape.length - 2, channel };
+  }
+  throw new Error('Sequences must have at least three dimensions.');
 }
 
 /**
- * Read one C-order frame using distinct zero-based frame, height, width and channel axes.
- * The remaining 5D axis is fixed at the zero-based extra index. `cancelled` is checked between reads.
+ * Read one frame using distinct zero-based spatial axes and fixed indices for remaining axes.
+ * `cancelled` is checked between reads.
  */
 export async function readSequenceFrame(file, header, axes, frame, extra = 0, cancelled = () => false) {
   const { shape, size, dataOffset, fortran } = header;
-  if (fortran) throw new Error('Fortran-order sequences are not supported.');
-  if (![4, 5].includes(shape.length)) throw new Error('Sequences must have four or five dimensions.');
+  if (shape.length < 3) throw new Error('Sequences must have at least three dimensions.');
   const { height, width, channel } = axes;
-  const axisList = [axes.frame, height, width, channel];
-  if (axisList.some(axis => !Number.isInteger(axis) || axis < 0 || axis >= shape.length) || new Set(axisList).size !== 4) throw new Error('Choose a different axis for each role.');
-  if (![1, 3, 4].includes(shape[channel])) throw new Error('The channel axis must have length 1, 3, or 4.');
-  const extraAxis = shape.findIndex((_, axis) => !axisList.includes(axis));
+  const axisList = [axes.frame, height, width, ...(channel === null ? [] : [channel])];
+  if (axisList.some(axis => !Number.isInteger(axis) || axis < 0 || axis >= shape.length) || new Set(axisList).size !== axisList.length) throw new Error('Choose a different axis for each role.');
+  if (channel !== null && ![1, 3, 4].includes(shape[channel])) throw new Error('The channel axis must have length 1, 3, or 4.');
+  const extraAxes = shape.map((_, axis) => axis).filter(axis => !axisList.includes(axis));
   if (!Number.isInteger(frame) || frame < 0 || frame >= shape[axes.frame]) throw new Error('Frame number is out of range.');
-  if (extraAxis !== -1 && (!Number.isInteger(extra) || extra < 0 || extra >= shape[extraAxis])) throw new Error('Extra axis index is out of range.');
   const fixed = new Map([[axes.frame, frame]]);
-  if (extraAxis !== -1) fixed.set(extraAxis, extra);
-  const strides = shape.map((_, axis) => shape.slice(axis + 1).reduce((a, b) => a * b, 1));
-  const lastFixed = Math.max(...fixed.keys());
-  const blockElements = strides[lastFixed];
-  const leading = shape.map((_, axis) => axis).filter(axis => axis < lastFixed && !fixed.has(axis));
+  const extraIndices = typeof extra === 'number' ? Object.fromEntries(extraAxes.slice(0, 1).map(axis => [axis, extra])) : extra;
+  for (const axis of extraAxes) {
+    const index = extraIndices[axis] ?? 0;
+    if (!Number.isInteger(index) || index < 0 || index >= shape[axis]) throw new Error('Extra axis index is out of range.');
+    fixed.set(axis, index);
+  }
+  const storageAxes = shape.map((_, axis) => axis);
+  if (fortran) storageAxes.reverse();
+  const strides = new Map();
+  let stride = 1;
+  for (const axis of [...storageAxes].reverse()) {
+    strides.set(axis, stride);
+    stride *= shape[axis];
+  }
+  const fixedStorage = [...fixed.keys()].map(axis => storageAxes.indexOf(axis));
+  const lastFixed = Math.max(...fixedStorage);
+  const blockElements = storageAxes.slice(lastFixed + 1).reduce((n, axis) => n * shape[axis], 1);
+  const leading = storageAxes.slice(0, lastFixed).filter(axis => !fixed.has(axis));
   const blocks = leading.reduce((n, axis) => n * shape[axis], 1);
   const totalBytes = blocks * blockElements * size;
   if (!Number.isSafeInteger(totalBytes)) throw new Error('Frame is too large.');
   const data = new Uint8Array(totalBytes);
-  const fixedOffset = [...fixed].reduce((n, [axis, value]) => n + value * strides[axis], 0);
+  const fixedOffset = [...fixed].reduce((n, [axis, value]) => n + value * strides.get(axis), 0);
   const blockBytes = blockElements * size;
   const batchSize = Math.max(1, Math.min(MAX_CONCURRENT_READS, Math.floor(MAX_BATCH_BYTES / blockBytes)));
   for (let start = 0; start < blocks; start += batchSize) {
@@ -60,7 +78,7 @@ export async function readSequenceFrame(file, header, axes, frame, extra = 0, ca
       let index = i, element = fixedOffset;
       for (let j = leading.length - 1; j >= 0; j--) {
         const axis = leading[j];
-        element += (index % shape[axis]) * strides[axis];
+        element += (index % shape[axis]) * strides.get(axis);
         index = Math.floor(index / shape[axis]);
       }
       const begin = dataOffset + element * size;
@@ -72,15 +90,15 @@ export async function readSequenceFrame(file, header, axes, frame, extra = 0, ca
     }
     await Promise.all(batch);
   }
-  const freeAxes = shape.map((_, axis) => axis).filter(axis => !fixed.has(axis));
+  const freeAxes = storageAxes.filter(axis => !fixed.has(axis));
   const packedStrides = new Map(freeAxes.map((axis, i) => [axis, freeAxes.slice(i + 1).reduce((n, next) => n * shape[next], 1)]));
   const read = npyReader(data.buffer, header);
-  const channels = shape[channel], w = shape[width], h = shape[height];
+  const channels = channel === null ? 1 : shape[channel], w = shape[width], h = shape[height];
   const yStride = packedStrides.get(height), xStride = packedStrides.get(width), cStride = packedStrides.get(channel);
   const values = new Float64Array(h * w * channels);
   let min = Infinity, max = -Infinity, target = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < channels; c++) {
-    const value = read(y * yStride + x * xStride + c * cStride);
+    const value = read(y * yStride + x * xStride + (channel === null ? 0 : c * cStride));
     values[target++] = value;
     if (Number.isFinite(value) && (channels !== 4 || c !== 3)) { min = Math.min(min, value); max = Math.max(max, value); }
   }

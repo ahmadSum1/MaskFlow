@@ -92,6 +92,25 @@ test('uses the video training shape as width by height and changes the clip axis
   assert.notDeepEqual([...first.values], [...third.values]);
 });
 
+test('reads higher-rank arrays with multiple indexed axes', async () => {
+  const file = fixture([2, 3, 2, 2, 2, 3]);
+  const header = await openNpy(file);
+  const axes = { frame: 0, height: 2, width: 3, channel: 5 };
+  const raster = await readSequenceFrame(file, header, axes, 1, { 1: 2, 4: 1 });
+  assert.deepEqual([raster.width, raster.height, raster.channels], [2, 2, 3]);
+  assert.deepEqual([...raster.values], [123, 124, 125, 129, 130, 131, 135, 136, 137, 141, 142, 143]);
+});
+
+test('reads Fortran-order sequences and 3D volumes', async () => {
+  const file = fixture([2, 2, 3], { fortran: true });
+  const header = await openNpy(file);
+  const axes = defaultSequenceAxes(header.shape);
+  assert.deepEqual(axes, { frame: 0, height: 1, width: 2, channel: null });
+  const raster = await readSequenceFrame(file, header, axes, 1);
+  assert.deepEqual([raster.width, raster.height, raster.channels], [3, 2, 1]);
+  assert.deepEqual([...raster.values], [1, 5, 9, 3, 7, 11]);
+});
+
 test('preserves finite range and alpha behavior for sequence frames', async () => {
   const header = new TextEncoder().encode("{'descr': '<f4', 'fortran_order': False, 'shape': (2, 1, 2, 4), }\n");
   const prefix = new Uint8Array([0x93, 78, 85, 77, 80, 89, 1, 0, 0, 0]);
@@ -106,12 +125,11 @@ test('preserves finite range and alpha behavior for sequence frames', async () =
   assert.equal(raster.values[3], 100);
 });
 
-test('rejects invalid axes, indices, Fortran order and truncated data', async () => {
+test('rejects invalid axes, indices and truncated data', async () => {
   const file = fixture([2, 2, 3, 2, 3]);
   const header = await openNpy(file);
   await assert.rejects(readSequenceFrame(file, header, { frame: 0, height: 0, width: 3, channel: 4 }, 0), /different axis/);
   await assert.rejects(readSequenceFrame(file, header, defaultSequenceAxes(header.shape), 3), /out of range/);
-  const fortran = fixture([2, 2, 3, 2, 3], { fortran: true });
-  await assert.rejects(readSequenceFrame(fortran, await openNpy(fortran), defaultSequenceAxes(header.shape), 0), /Fortran-order/);
+  await assert.rejects(readSequenceFrame(file, header, defaultSequenceAxes(header.shape), 0, { 0: 2 }), /out of range/);
   await assert.rejects(openNpy(file.slice(0, file.size - 1)), /Truncated/);
 });

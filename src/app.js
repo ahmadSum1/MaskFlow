@@ -7,10 +7,18 @@ import { extractMetadata, formatMetadata } from './metadata.js';
 const $ = id => document.getElementById(id);
 const baseCanvas = $('base-canvas');
 const maskCanvas = $('mask-canvas');
+const canvasWrap = $('canvas-wrap');
+const canvasStack = $('canvas-stack');
 const state = { pairs: [], maskGroups: new Map(), index: -1, base: null, mask: null, request: 0, datasetVersion: 0, inputVersion: 0, pickerOpen: false, sampleLoading: false, indexing: false, indexMessage: '', viewLoading: false, cancelIndex: null, viewVersion: 0, cancelView: null, rows: [], visibleRows: [], navigation: [], positions: new Map(), rowPositions: new Map(), ancestors: new Map(), collapsed: new Set(), expandedBases: new Set(), dimensions: new WeakMap() };
 const ROW_HEIGHT = 61;
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 8;
 let maskTarget = null;
 let renderedRange = null;
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+let panPointer = null;
 let contextInfo = null;
 let contextOrigin = null;
 let metadataRequest = 0;
@@ -46,11 +54,43 @@ function setError(message) {
   $('error-message').hidden = !message;
 }
 
+function updateZoom() {
+  canvasStack.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  canvasWrap.classList.toggle('zoomed', zoom > 1);
+  $('zoom-value').textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function setZoom(next, point = null) {
+  const updated = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next));
+  if (point) {
+    const bounds = canvasWrap.getBoundingClientRect();
+    const x = point.x - bounds.left - bounds.width / 2;
+    const y = point.y - bounds.top - bounds.height / 2;
+    panX = x - (x - panX) * updated / zoom;
+    panY = y - (y - panY) * updated / zoom;
+  } else {
+    panX *= updated / zoom;
+    panY *= updated / zoom;
+  }
+  zoom = updated;
+  if (zoom === 1) { panX = 0; panY = 0; }
+  updateZoom();
+}
+
+function resetZoom() {
+  zoom = 1;
+  panX = 0;
+  panY = 0;
+  updateZoom();
+}
+
 async function loadRaster(info) {
   const file = await resolveFile(info.file);
   if (info.isNpy) {
     const header = await openNpy(file);
-    if ([4, 5].includes(header.shape.length)) return { type: 'sequence', file, header };
+    const shape = header.shape;
+    const isUnchannelledVolume = shape.length === 3 && ![1, 3, 4].includes(shape[0]) && ![1, 3, 4].includes(shape[2]);
+    if (shape.length >= 4 || isUnchannelledVolume) return { type: 'sequence', file, header };
     const buffer = await file.arrayBuffer();
     if (buffer.byteLength !== file.size) throw new Error('Truncated NPY data.');
     return { type: 'array', ...arrayRaster({ ...header, read: npyReader(buffer, header, header.dataOffset) }) };
@@ -119,6 +159,7 @@ function render() {
   paintRaster(baseCanvas, state.base, false);
   if (state.mask) paintRaster(maskCanvas, state.mask, true);
   maskCanvas.hidden = !state.mask;
+  canvasStack.classList.toggle('match-mask-size', $('match-mask-size').checked);
   updateLayerOrder();
   $('color-ramp').style.background = `linear-gradient(to right, ${colorStops($('colormap').value).join(', ')})`;
 }
@@ -143,6 +184,7 @@ function updateMaskControls() {
   $('add-mask').disabled = busy || !pair;
   $('replace-mask').disabled = busy || !pair?.mask;
   $('swap-layers').disabled = !pair?.mask;
+  $('match-mask-size').disabled = !pair?.mask;
   if (!pair?.mask) {
     selectMask.add(new Option('No mask selected', ''));
     selectMask.disabled = true;
@@ -237,6 +279,7 @@ function clearDataset() {
 function resetViewer(noMatches) {
   state.request++;
   clearSequence();
+  resetZoom();
   state.index = -1;
   state.base = null;
   state.mask = null;
@@ -406,19 +449,62 @@ function clearSequence() {
 function setupSequence(source, previous = null) {
   const { shape } = source.header;
   const axes = previous?.axes || defaultSequenceAxes(shape);
-  sequence = { ...source, axes, frame: previous?.frame ?? 0, extra: previous?.extra ?? 0 };
+  sequence = { ...source, axes, frame: previous?.frame ?? 0, extra: previous?.extra ?? {} };
   $('sequence-shape').textContent = `Shape: (${shape.join(', ')}). Axis numbers are zero-based.`;
   for (const role of ['frame', 'height', 'width', 'channel']) {
     const select = $(`axis-${role}`);
-    select.replaceChildren(...shape.map((size, axis) => new Option(`Axis ${axis} (${size})`, String(axis))));
-    select.value = String(axes[role]);
+    select.replaceChildren(...(role === 'channel' ? [new Option('None', '')] : []), ...shape.map((size, axis) => new Option(`Axis ${axis} (${size})`, String(axis))));
+    select.value = axes[role] === null ? '' : String(axes[role]);
   }
+  renderExtraAxisControls();
   $('sequence-controls').hidden = false;
   updateFrameControls();
 }
 
-function extraAxis(shape, axes) {
-  return shape.findIndex((_, axis) => !Object.values(axes).includes(axis));
+function extraAxes(shape, axes) {
+  const used = new Set(Object.values(axes).filter(axis => axis !== null));
+  return shape.map((_, axis) => axis).filter(axis => !used.has(axis));
+}
+
+function renderExtraAxisControls() {
+  const container = $('extra-controls');
+  container.replaceChildren();
+  if (!sequence) return;
+  for (const axis of extraAxes(sequence.header.shape, sequence.axes)) {
+    const row = document.createElement('div');
+    row.className = 'sequence-navigation sequence-extra';
+    const label = document.createElement('span');
+    label.textContent = `Axis ${axis} (${sequence.header.shape[axis]})`;
+    const previous = document.createElement('button');
+    previous.className = 'nav-button';
+    previous.type = 'button';
+    previous.dataset.axis = axis;
+    previous.dataset.direction = '-1';
+    previous.setAttribute('aria-label', `Previous index for axis ${axis}`);
+    previous.textContent = '←';
+    const inputLabel = document.createElement('label');
+    inputLabel.textContent = 'Index ';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.step = '1';
+    input.max = sequence.header.shape[axis];
+    input.value = (sequence.extra[axis] ?? 0) + 1;
+    input.dataset.axis = axis;
+    inputLabel.append(input);
+    const total = document.createElement('span');
+    total.textContent = `/ ${sequence.header.shape[axis]}`;
+    const next = document.createElement('button');
+    next.className = 'nav-button';
+    next.type = 'button';
+    next.dataset.axis = axis;
+    next.dataset.direction = '1';
+    next.setAttribute('aria-label', `Next index for axis ${axis}`);
+    next.textContent = '→';
+    row.append(label, previous, inputLabel, total, next);
+    container.append(row);
+  }
+  container.hidden = !container.childElementCount;
 }
 
 function updateFrameControls() {
@@ -429,16 +515,13 @@ function updateFrameControls() {
   $('frame-total').textContent = `/ ${count}`;
   $('frame-previous').disabled = sequence.frame === 0;
   $('frame-next').disabled = sequence.frame === count - 1;
-  const axis = extraAxis(sequence.header.shape, sequence.axes);
-  $('extra-controls').hidden = axis === -1;
-  if (axis !== -1) {
-    const total = sequence.header.shape[axis];
-    $('extra-axis-name').textContent = `Extra axis ${axis}`;
-    $('axis-extra').max = total;
-    $('axis-extra').value = sequence.extra + 1;
-    $('extra-total').textContent = `/ ${total}`;
-    $('extra-previous').disabled = sequence.extra === 0;
-    $('extra-next').disabled = sequence.extra === total - 1;
+  for (const button of $('extra-controls').querySelectorAll('button[data-axis]')) {
+    const axis = Number(button.dataset.axis);
+    const index = sequence.extra[axis] ?? 0;
+    button.disabled = button.dataset.direction === '-1' ? index === 0 : index === sequence.header.shape[axis] - 1;
+  }
+  for (const input of $('extra-controls').querySelectorAll('input[data-axis]')) {
+    input.value = (sequence.extra[Number(input.dataset.axis)] ?? 0) + 1;
   }
 }
 
@@ -479,7 +562,7 @@ async function select(index) {
   const pair = state.pairs[index];
   const currentPair = state.pairs[state.index];
   const previousSequence = sequence && currentPair?.base.file === pair.base.file
-    ? { axes: { ...sequence.axes }, frame: sequence.frame, extra: sequence.extra }
+    ? { axes: { ...sequence.axes }, frame: sequence.frame, extra: { ...sequence.extra } }
     : null;
   const ancestors = state.ancestors.get(index) || [];
   if (ancestors.some(key => state.collapsed.has(key))) {
@@ -1458,6 +1541,9 @@ $('remove-form').addEventListener('submit', event => {
   showNotice('Selected folders removed from the viewer; local files were not changed.');
 });
 $('mask-select').addEventListener('change', event => select(Number(event.target.value)));
+$('match-mask-size').addEventListener('change', event => {
+  canvasStack.classList.toggle('match-mask-size', event.target.checked);
+});
 $('swap-layers').addEventListener('click', () => {
   const pair = state.pairs[state.index];
   if (!pair?.mask) return;
@@ -1617,26 +1703,56 @@ datasetList.addEventListener('keydown', event => {
   datasetList.focus({ preventScroll: true });
 });
 $('opacity').addEventListener('input', () => { $('opacity-value').value = `${$('opacity').value}%`; updateLayerOrder(); });
+$('zoom-in').addEventListener('click', () => setZoom(zoom * 1.25));
+$('zoom-out').addEventListener('click', () => setZoom(zoom / 1.25));
+$('zoom-fit').addEventListener('click', resetZoom);
+canvasWrap.addEventListener('wheel', event => {
+  if (event.target.closest?.('.zoom-controls')) return;
+  event.preventDefault();
+  setZoom(zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX, y: event.clientY });
+}, { passive: false });
+canvasWrap.addEventListener('pointerdown', event => {
+  if (zoom <= 1 || event.target.closest?.('.zoom-controls') || event.button !== 0) return;
+  panPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, panX, panY };
+  canvasWrap.classList.add('panning');
+  canvasWrap.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+canvasWrap.addEventListener('pointermove', event => {
+  if (!panPointer || panPointer.id !== event.pointerId) return;
+  panX = panPointer.panX + event.clientX - panPointer.x;
+  panY = panPointer.panY + event.clientY - panPointer.y;
+  updateZoom();
+});
+function finishPanning(event) {
+  if (!panPointer || panPointer.id !== event.pointerId) return;
+  panPointer = null;
+  canvasWrap.classList.remove('panning');
+  if (canvasWrap.hasPointerCapture(event.pointerId)) canvasWrap.releasePointerCapture(event.pointerId);
+}
+canvasWrap.addEventListener('pointerup', finishPanning);
+canvasWrap.addEventListener('pointercancel', finishPanning);
 $('colormap').addEventListener('change', () => { $('color-ramp').style.background = `linear-gradient(to right, ${colorStops($('colormap').value).join(', ')})`; try { render(); } catch (error) { setError(`Could not render: ${error.message}`); } });
 $('apply-axes').addEventListener('click', () => {
   if (!sequence) return;
   stopPlayback();
   sequenceVersion++;
-  const axes = Object.fromEntries(['frame', 'height', 'width', 'channel'].map(role => [role, Number($(`axis-${role}`).value)]));
+  const axes = Object.fromEntries(['frame', 'height', 'width', 'channel'].map(role => {
+    const value = $(`axis-${role}`).value;
+    return [role, value === '' ? null : Number(value)];
+  }));
   const shape = sequence.header.shape;
   const invalid = message => { $('status').textContent = 'Unable to load frame'; setError(message); };
-  if (new Set(Object.values(axes)).size !== 4) return invalid('Choose a different axis for each role.');
-  if (![1, 3, 4].includes(shape[axes.channel])) return invalid('The channel axis must have length 1, 3, or 4.');
-  const previousExtraAxis = extraAxis(shape, sequence.axes);
-  const nextExtraAxis = extraAxis(shape, axes);
-  if (previousExtraAxis !== nextExtraAxis) sequence.extra = 0;
+  const assigned = Object.values(axes).filter(axis => axis !== null);
+  if (new Set(assigned).size !== assigned.length) return invalid('Choose a different axis for each role.');
+  if (axes.channel !== null && ![1, 3, 4].includes(shape[axes.channel])) return invalid('The channel axis must have length 1, 3, or 4.');
   sequence.axes = axes;
+  sequence.extra = Object.fromEntries(extraAxes(shape, axes).map(axis => [axis, sequence.extra[axis] ?? 0]));
+  renderExtraAxisControls();
   showFrame(0);
 });
-function selectExtra(extra) {
+function selectExtra(axis, extra) {
   if (!sequence) return;
-  const axis = extraAxis(sequence.header.shape, sequence.axes);
-  if (axis === -1) return;
   const total = sequence.header.shape[axis];
   if (!Number.isInteger(extra) || extra < 0 || extra >= total) {
     setError(`Extra axis index must be between 1 and ${total}.`);
@@ -1644,12 +1760,19 @@ function selectExtra(extra) {
     return;
   }
   stopPlayback();
-  sequence.extra = extra;
+  sequence.extra[axis] = extra;
   showFrame(sequence.frame);
 }
-$('extra-previous').addEventListener('click', () => { if (sequence) selectExtra(sequence.extra - 1); });
-$('extra-next').addEventListener('click', () => { if (sequence) selectExtra(sequence.extra + 1); });
-$('axis-extra').addEventListener('change', () => selectExtra(Number($('axis-extra').value) - 1));
+$('extra-controls').addEventListener('click', event => {
+  const button = event.target.closest('button[data-axis]');
+  if (!button || !sequence) return;
+  const axis = Number(button.dataset.axis);
+  selectExtra(axis, (sequence.extra[axis] ?? 0) + Number(button.dataset.direction));
+});
+$('extra-controls').addEventListener('change', event => {
+  const input = event.target.closest('input[data-axis]');
+  if (input) selectExtra(Number(input.dataset.axis), Number(input.value) - 1);
+});
 $('frame-previous').addEventListener('click', () => { if (sequence && sequence.frame > 0) { stopPlayback(); showFrame(sequence.frame - 1); } });
 $('frame-next').addEventListener('click', () => { if (sequence && sequence.frame + 1 < sequence.header.shape[sequence.axes.frame]) { stopPlayback(); showFrame(sequence.frame + 1); } });
 $('frame-number').addEventListener('change', () => {

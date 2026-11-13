@@ -312,7 +312,7 @@ export function parseNpyHeader(buffer, fileSize = buffer.byteLength) {
   const order = /['"]fortran_order['"]\s*:\s*(True|False)/.exec(header)?.[1];
   if (!descr || shapeText === undefined || !order) throw new Error('Invalid NPY header.');
   const shape = shapeText.split(',').map(s => s.trim()).filter(Boolean).map(s => /^\d+$/.test(s) ? Number(s) : NaN);
-  if (!shape.length || shape.some(n => !Number.isSafeInteger(n) || n <= 0)) throw new Error('Array dimensions must be positive integers.');
+  if (shape.some(n => !Number.isSafeInteger(n) || n <= 0)) throw new Error('Array dimensions must be positive integers.');
   const dtype = /^([<>=|])([?biuf])(\d+)$/.exec(descr);
   if (!dtype) throw new Error(`Unsupported NumPy dtype: ${descr}.`);
   const [, endian, kind, sizeText] = dtype;
@@ -345,10 +345,10 @@ export function parseNpy(buffer) {
 export function arrayRaster(array) {
   const shape = array.shape;
   const channelFirst = shape.length === 3 && [1, 3, 4].includes(shape[0]) && ![1, 3, 4].includes(shape[2]);
-  if (shape.length !== 2 && !(shape.length === 3 && (channelFirst || [1, 3, 4].includes(shape[2])))) throw new Error(`Unsupported array shape (${shape.join(', ')}). Expected H×W, H×W×C, or C×H×W with 1, 3, or 4 channels.`);
-  const height = channelFirst ? shape[1] : shape[0];
-  const width = channelFirst ? shape[2] : shape[1];
-  const channels = channelFirst ? shape[0] : shape[2] || 1;
+  if (shape.length > 3 || (shape.length === 3 && !(channelFirst || [1, 3, 4].includes(shape[2])))) throw new Error(`Unsupported array shape (${shape.join(', ')}). Expected a scalar, vector, H×W, H×W×C, or C×H×W with 1, 3, or 4 channels.`);
+  const height = shape.length === 0 || shape.length === 1 ? 1 : channelFirst ? shape[1] : shape[0];
+  const width = shape.length === 0 ? 1 : shape.length === 1 ? shape[0] : channelFirst ? shape[2] : shape[1];
+  const channels = channelFirst ? shape[0] : shape.length === 3 ? shape[2] : 1;
   const values = new Float64Array(height * width * channels);
   let min = Infinity, max = -Infinity;
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) for (let c = 0; c < channels; c++) {
