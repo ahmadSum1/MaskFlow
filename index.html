@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#11131a">
   <meta name="description" content="A private, browser-based viewer for NumPy arrays and segmentation masks.">
   <title>MaskFlow — Visualize what matters</title>
-  <link rel="stylesheet" href="./styles.css?v=2">
+  <link rel="stylesheet" href="./styles.css?v=3">
 </head>
 <body>
   <header class="topbar">
@@ -37,7 +37,7 @@
         <label class="view-switch"><span>Group by pair status</span><input id="group-items" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
         <label class="view-switch"><span>Tree view</span><input id="tree-toggle" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></label>
       </div>
-      <details id="advanced-menu" class="advanced-menu" hidden><summary>Advanced</summary><div><button id="match-loaded" class="button button-outline" type="button">Match loaded folders</button><button id="remove-folders" class="button button-outline" type="button">Remove folders</button></div></details>
+      <details id="advanced-menu" class="advanced-menu" hidden><summary>Advanced</summary><div><button id="match-loaded" class="button button-outline" type="button">Match loaded folders</button><button id="remove-folders" class="button button-outline" type="button">Remove folders</button><div class="cache-setting"><label for="frame-cache-limit">Frame cache limit (MiB)</label><input id="frame-cache-limit" type="number" min="1" max="8589934591" step="1" value="256" aria-describedby="frame-cache-hint frame-cache-error"><p id="frame-cache-hint">Cached frames only; decoding and display use additional RAM.</p><p id="frame-cache-error" role="alert" hidden></p></div></div></details>
       <div id="busy-indicator" class="busy-indicator" hidden><div class="busy-status" role="status"><span class="spinner" aria-hidden="true"></span><span id="busy-message"></span></div><div id="picker-recovery" class="picker-recovery" hidden><span>If the picker is closed but this message remains:</span><button id="reset-picker" type="button">Stop waiting</button><button id="fallback-picker" type="button" hidden>Try alternative folder picker</button></div></div>
       <div id="view-status" class="view-status" role="status"></div>
       <div class="dataset-label"><span>FILES &amp; PAIRS</span><span id="pair-summary">0 items</span></div>

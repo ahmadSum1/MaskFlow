@@ -1,7 +1,8 @@
 import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRule, inFolder, npyReader, removeFolders, resolveFile } from './core.js';
 import { loadSampleFiles } from './samples.js';
 import { groupBaseRows, pairStatus, visibleDatasetRows } from './dataset-view.js';
-import { defaultSequenceAxes, openNpy, readSequenceFrame } from './sequence.js';
+import { defaultSequenceAxes, openNpy } from './sequence.js';
+import { DEFAULT_CACHE_BYTES, SequenceFrameCache } from './sequence-cache.js';
 import { extractMetadata, formatMetadata } from './metadata.js';
 
 const $ = id => document.getElementById(id);
@@ -43,6 +44,9 @@ let sequenceVersion = 0;
 let playbackTimer = null;
 let playing = false;
 let playbackFps = 10;
+const MIB = 1024 * 1024;
+const CACHE_LIMIT_KEY = 'maskflow-frame-cache-mib';
+let cacheLimitBytes = DEFAULT_CACHE_BYTES;
 
 function showNotice(message) {
   $('notice').textContent = message;
@@ -53,6 +57,47 @@ function setError(message) {
   $('error-message').textContent = message;
   $('error-message').hidden = !message;
 }
+
+function cacheLimitError(message) {
+  $('frame-cache-error').textContent = message;
+  $('frame-cache-error').hidden = !message;
+}
+
+function parseCacheLimit(value) {
+  const mib = Number(value);
+  const bytes = mib * MIB;
+  return value.trim() !== '' && Number.isSafeInteger(mib) && mib >= 1 && Number.isSafeInteger(bytes) ? bytes : null;
+}
+
+try {
+  const saved = localStorage.getItem(CACHE_LIMIT_KEY);
+  if (saved !== null) {
+    const bytes = parseCacheLimit(saved);
+    if (bytes === null) cacheLimitError('Saved frame cache limit is invalid; using 256 MiB.');
+    else cacheLimitBytes = bytes;
+  }
+} catch (error) {
+  cacheLimitError(`Could not restore the frame cache limit: ${error.message}`);
+}
+$('frame-cache-limit').value = cacheLimitBytes / MIB;
+$('frame-cache-limit').addEventListener('change', event => {
+  const input = event.currentTarget;
+  const bytes = parseCacheLimit(input.value);
+  if (bytes === null) {
+    input.setAttribute('aria-invalid', 'true');
+    cacheLimitError('Enter a whole number of MiB between 1 and 8589934591.');
+    return;
+  }
+  input.removeAttribute('aria-invalid');
+  cacheLimitBytes = bytes;
+  sequence?.cache.setLimit(bytes);
+  try {
+    localStorage.setItem(CACHE_LIMIT_KEY, String(bytes / MIB));
+    cacheLimitError('');
+  } catch (error) {
+    cacheLimitError(`Limit applied for this tab, but could not be saved: ${error.message}`);
+  }
+});
 
 function updateZoom() {
   canvasStack.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
@@ -442,6 +487,7 @@ function stopPlayback() {
 function clearSequence() {
   stopPlayback();
   sequenceVersion++;
+  sequence?.cache.dispose();
   sequence = null;
   $('sequence-controls').hidden = true;
 }
@@ -449,7 +495,9 @@ function clearSequence() {
 function setupSequence(source, previous = null) {
   const { shape } = source.header;
   const axes = previous?.axes || defaultSequenceAxes(shape);
-  sequence = { ...source, axes, frame: previous?.frame ?? 0, extra: previous?.extra ?? {} };
+  const cache = new SequenceFrameCache(source.file, source.header);
+  cache.setLimit(cacheLimitBytes);
+  sequence = { ...source, axes, frame: previous?.frame ?? 0, extra: previous?.extra ?? {}, cache };
   $('sequence-shape').textContent = `Shape: (${shape.join(', ')}). Axis numbers are zero-based.`;
   for (const role of ['frame', 'height', 'width', 'channel']) {
     const select = $(`axis-${role}`);
@@ -534,7 +582,7 @@ async function showFrame(frame) {
   $('status').textContent = 'Loading frame…';
   setError('');
   try {
-    const raster = await readSequenceFrame(current.file, current.header, current.axes, frame, current.extra, () => version !== sequenceVersion);
+    const raster = await current.cache.getFrame(current.axes, frame, current.extra);
     if (version !== sequenceVersion) return;
     state.base = { type: 'array', ...raster };
     render();

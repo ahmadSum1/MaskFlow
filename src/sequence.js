@@ -3,6 +3,8 @@ import { npyReader, parseNpyHeader } from './core.js';
 const MAX_HEADER_BYTES = 1048576;
 const MAX_CONCURRENT_READS = 16;
 const MAX_BATCH_BYTES = 4 * 1024 * 1024;
+const MAX_COALESCED_BYTES = 256 * 1024;
+const MAX_READ_AMPLIFICATION = 4;
 
 /** Read and validate an NPY header without loading its array data. */
 export async function openNpy(file) {
@@ -70,11 +72,25 @@ export async function readSequenceFrame(file, header, axes, frame, extra = 0, ca
   const data = new Uint8Array(totalBytes);
   const fixedOffset = [...fixed].reduce((n, [axis, value]) => n + value * strides.get(axis), 0);
   const blockBytes = blockElements * size;
-  const batchSize = Math.max(1, Math.min(MAX_CONCURRENT_READS, Math.floor(MAX_BATCH_BYTES / blockBytes)));
-  for (let start = 0; start < blocks; start += batchSize) {
+  const step = leading.length ? strides.get(leading.at(-1)) * size : blockBytes;
+  let runBlocks = leading.length ? shape[leading.at(-1)] : 1;
+  for (let i = leading.length - 2; i >= 0; i--) {
+    if (strides.get(leading[i]) * size !== step * runBlocks) break;
+    runBlocks *= shape[leading[i]];
+  }
+  const groupLimit = step <= blockBytes * MAX_READ_AMPLIFICATION && blockBytes <= MAX_COALESCED_BYTES
+    ? Math.floor((MAX_COALESCED_BYTES - blockBytes) / step) + 1
+    : 1;
+  const maxReadBytes = groupLimit > 1 ? MAX_COALESCED_BYTES : blockBytes;
+  const batchSize = Math.max(1, Math.min(MAX_CONCURRENT_READS, Math.floor(MAX_BATCH_BYTES / maxReadBytes)));
+  let start = 0;
+  while (start < blocks) {
     if (cancelled()) throw new Error('Frame loading cancelled.');
     const batch = [];
-    for (let i = start; i < Math.min(start + batchSize, blocks); i++) {
+    for (let n = 0; n < batchSize && start < blocks; n++) {
+      const i = start;
+      const count = Math.min(groupLimit, runBlocks - i % runBlocks, blocks - i);
+      start += count;
       let index = i, element = fixedOffset;
       for (let j = leading.length - 1; j >= 0; j--) {
         const axis = leading[j];
@@ -82,10 +98,17 @@ export async function readSequenceFrame(file, header, axes, frame, extra = 0, ca
         index = Math.floor(index / shape[axis]);
       }
       const begin = dataOffset + element * size;
-      batch.push(file.slice(begin, begin + blockBytes).arrayBuffer().then(buffer => {
+      const length = (count - 1) * step + blockBytes;
+      batch.push(file.slice(begin, begin + length).arrayBuffer().then(buffer => {
         if (cancelled()) throw new Error('Frame loading cancelled.');
-        if (buffer.byteLength !== blockBytes) throw new Error('Truncated NPY data.');
-        data.set(new Uint8Array(buffer), i * blockBytes);
+        if (buffer.byteLength !== length) throw new Error('Truncated NPY data.');
+        const source = new Uint8Array(buffer);
+        if (step === blockBytes || count === 1) data.set(source, i * blockBytes);
+        else if (blockBytes === 1) {
+          for (let j = 0; j < count; j++) data[i + j] = source[j * step];
+        } else {
+          for (let j = 0; j < count; j++) data.set(source.subarray(j * step, j * step + blockBytes), (i + j) * blockBytes);
+        }
       }));
     }
     await Promise.all(batch);

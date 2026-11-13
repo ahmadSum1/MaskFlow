@@ -36,6 +36,74 @@ test('extracts noncontiguous five-dimensional frames and supports changing axes'
   assert.deepEqual([...alternate.values], [48, 49, 50, 66, 67, 68, 51, 52, 53, 69, 70, 71]);
 });
 
+test('efficiently reads a selected RGB channel as a scalar frame', async () => {
+  const blob = fixture([2, 80, 256, 3]);
+  let reads = 0, bytes = 0;
+  const file = { size: blob.size, slice(start, end) {
+    const part = blob.slice(start, end);
+    return { async arrayBuffer() { reads++; bytes += part.size; return part.arrayBuffer(); } };
+  } };
+  const header = await openNpy(file);
+  const axes = { frame: 0, height: 1, width: 2, channel: null };
+  for (let channel = 0; channel < 3; channel++) {
+    reads = 0; bytes = 0;
+    const raster = await readSequenceFrame(file, header, axes, 1, { 3: channel });
+    assert.equal(raster.channels, 1);
+    assert.equal(raster.values.length, 80 * 256);
+    assert.ok(raster.values.every((value, i) => value === ((80 * 256 + i) * 3 + channel) % 256));
+    assert.ok(reads <= 2, `Expected at most 2 reads, got ${reads}`);
+    assert.ok(bytes <= 3 * 80 * 256);
+  }
+});
+
+test('coalesces channel reads without crossing gaps between video columns', async () => {
+  const blob = fixture([2, 4, 10, 6, 3]);
+  let reads = 0, bytes = 0;
+  const file = { size: blob.size, slice(start, end) {
+    const part = blob.slice(start, end);
+    return { async arrayBuffer() { reads++; bytes += part.size; return part.arrayBuffer(); } };
+  } };
+  const header = await openNpy(file);
+  reads = 0; bytes = 0;
+  const raster = await readSequenceFrame(file, header, { frame: 2, height: 3, width: 1, channel: null }, 4, { 0: 1, 4: 2 });
+  assert.deepEqual([...raster.values], Array.from({ length: 24 }, (_, i) => {
+    const y = Math.floor(i / 4), x = i % 4;
+    return (((1 * 4 + x) * 10 + 4) * 6 * 3 + y * 3 + 2) % 256;
+  }));
+  assert.equal(reads, 4);
+  assert.ok(bytes <= 24 * 3);
+});
+
+test('coalesces multibyte channel values without changing their byte order', async () => {
+  const text = new TextEncoder().encode("{'descr': '>u2', 'fortran_order': False, 'shape': (2, 2, 3, 3), }\n");
+  const prefix = new Uint8Array([0x93, 78, 85, 77, 80, 89, 1, 0, 0, 0]);
+  new DataView(prefix.buffer).setUint16(8, text.length, true);
+  const bytes = new Uint8Array(2 * 2 * 3 * 3 * 2);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < bytes.length / 2; i++) view.setUint16(i * 2, 1000 + i);
+  const file = new Blob([prefix, text, bytes]);
+  const header = await openNpy(file);
+  const raster = await readSequenceFrame(file, header, { frame: 0, height: 1, width: 2, channel: null }, 1, { 3: 1 });
+  assert.deepEqual([...raster.values], [1019, 1022, 1025, 1028, 1031, 1034]);
+});
+
+test('coalesces selected channels in Fortran-order arrays', async () => {
+  const blob = fixture([3, 4, 5, 2], { fortran: true });
+  let reads = 0;
+  const file = { size: blob.size, slice(start, end) {
+    const part = blob.slice(start, end);
+    return { async arrayBuffer() { reads++; return part.arrayBuffer(); } };
+  } };
+  const header = await openNpy(file);
+  reads = 0;
+  const raster = await readSequenceFrame(file, header, { frame: 3, height: 1, width: 2, channel: null }, 1, { 0: 2 });
+  assert.deepEqual([...raster.values], Array.from({ length: 20 }, (_, i) => {
+    const y = Math.floor(i / 5), x = i % 5;
+    return 2 + 3 * (y + 4 * (x + 5));
+  }));
+  assert.equal(reads, 1);
+});
+
 test('bounds concurrent reads when extracting a noncontiguous frame', async () => {
   const blob = fixture([2, 80, 2, 2, 3]);
   let active = 0, peak = 0;
