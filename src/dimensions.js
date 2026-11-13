@@ -1,3 +1,5 @@
+import { defaultSequenceAxes } from './sequence.js';
+
 function valid(width, height) {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0 || !Number.isSafeInteger(width * height)) throw new Error('Invalid dimensions');
   return { width, height };
@@ -56,6 +58,10 @@ export async function readDimensions(file) {
     const shapeText = /['"]shape['"]\s*:\s*\(([^)]*)\)/.exec(header)?.[1];
     if (shapeText === undefined) throw new Error('Invalid NPY shape');
     const shape = shapeText.split(',').map(value => value.trim()).filter(Boolean).map(value => /^\d+$/.test(value) ? Number(value) : NaN);
+    if ([4, 5].includes(shape.length)) {
+      const axes = defaultSequenceAxes(shape);
+      return valid(shape[axes.width], shape[axes.height]);
+    }
     const channelFirst = shape.length === 3 && [1, 3, 4].includes(shape[0]) && ![1, 3, 4].includes(shape[2]);
     if (shape.length !== 2 && !(shape.length === 3 && (channelFirst || [1, 3, 4].includes(shape[2])))) throw new Error('Unsupported NPY shape');
     return valid(channelFirst ? shape[2] : shape[1], channelFirst ? shape[1] : shape[0]);

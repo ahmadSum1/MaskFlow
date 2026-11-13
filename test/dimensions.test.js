@@ -18,6 +18,8 @@ test('reads NumPy spatial dimensions without array data', async () => {
   assert.deepEqual(await readDimensions(npy('10, 20')), { width: 20, height: 10 });
   assert.deepEqual(await readDimensions(npy('3, 10, 20', 2)), { width: 20, height: 10 });
   assert.deepEqual(await readDimensions(npy('3, 10, 4', 3)), { width: 10, height: 3 });
+  assert.deepEqual(await readDimensions(npy('2, 10, 20, 3')), { width: 20, height: 10 });
+  assert.deepEqual(await readDimensions(npy('2, 10, 3, 20, 3')), { width: 20, height: 10 });
   await assert.rejects(readDimensions(npy('2, 10, 20')), /Unsupported NPY shape/);
 });
 

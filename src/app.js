@@ -13,6 +13,7 @@ let maskTarget = null;
 let renderedRange = null;
 let contextInfo = null;
 let contextOrigin = null;
+let metadataRequest = 0;
 let addFolderMode = 'dataset';
 let addFolderMatch = null;
 let nextSourceId = 1;
@@ -402,10 +403,10 @@ function clearSequence() {
   $('sequence-controls').hidden = true;
 }
 
-function setupSequence(source) {
+function setupSequence(source, previous = null) {
   const { shape } = source.header;
-  const axes = defaultSequenceAxes(shape);
-  sequence = { ...source, axes, frame: 0, extra: 0 };
+  const axes = previous?.axes || defaultSequenceAxes(shape);
+  sequence = { ...source, axes, frame: previous?.frame ?? 0, extra: previous?.extra ?? 0 };
   $('sequence-shape').textContent = `Shape: (${shape.join(', ')}). Axis numbers are zero-based.`;
   for (const role of ['frame', 'height', 'width', 'channel']) {
     const select = $(`axis-${role}`);
@@ -475,6 +476,11 @@ async function showFrame(frame) {
 
 async function select(index) {
   if (!state.positions.has(index)) return;
+  const pair = state.pairs[index];
+  const currentPair = state.pairs[state.index];
+  const previousSequence = sequence && currentPair?.base.file === pair.base.file
+    ? { axes: { ...sequence.axes }, frame: sequence.frame, extra: sequence.extra }
+    : null;
   const ancestors = state.ancestors.get(index) || [];
   if (ancestors.some(key => state.collapsed.has(key))) {
     for (const key of ancestors) state.collapsed.delete(key);
@@ -485,7 +491,6 @@ async function select(index) {
   state.index = index;
   state.base = null;
   state.mask = null;
-  const pair = state.pairs[index];
   renderList(true);
   updateMaskControls();
   $('viewer-name').textContent = pair.base.name;
@@ -509,8 +514,8 @@ async function select(index) {
     if (mask?.type === 'sequence') throw new Error('Sequence masks are not supported.');
     if (base.type === 'sequence') {
       state.mask = mask;
-      setupSequence(base);
-      await showFrame(0);
+      setupSequence(base, previousSequence);
+      await showFrame(previousSequence?.frame ?? 0);
       return;
     }
     state.base = base;
@@ -1491,6 +1496,10 @@ const fileMenu = $('file-menu');
 function closeFileMenu(restoreFocus = false) {
   fileMenu.hidden = true;
   if (restoreFocus && contextOrigin?.isConnected) contextOrigin.focus({ preventScroll: true });
+  metadataRequest++;
+  $('copy-file-metadata').hidden = true;
+  $('copy-file-metadata').dataset.metadata = '';
+  $('file-menu-separator').hidden = true;
   contextInfo = null;
   contextOrigin = null;
 }
@@ -1504,15 +1513,20 @@ datasetList.addEventListener('contextmenu', event => {
   event.preventDefault();
   contextInfo = info;
   contextOrigin = item;
+  const request = ++metadataRequest;
+  $('copy-file-metadata').hidden = true;
+  $('copy-file-metadata').dataset.metadata = '';
+  $('file-menu-separator').hidden = true;
   $('file-menu-name').textContent = info.name;
   $('file-menu-name').title = info.path;
   const hasPath = info.path !== info.name;
   $('copy-file-path').disabled = !hasPath;
   $('file-menu-note').textContent = `${hasPath ? '' : 'No relative path is available for this file. '}Browsers cannot reveal local folders or access absolute paths.`;
   
-  // Try to extract metadata asynchronously
-  extractMetadata(contextInfo.file).then(metadata => {
-    if (contextInfo === info && metadata) {
+  resolveFile(info.file).then(file => extractMetadata(file)).then(metadata => {
+    if (request !== metadataRequest || contextInfo !== info) return;
+    if (metadata) {
+      metadata.filename = info.path;
       $('copy-file-metadata').hidden = false;
       $('file-menu-separator').hidden = false;
       $('copy-file-metadata').dataset.metadata = JSON.stringify(metadata);
@@ -1521,6 +1535,7 @@ datasetList.addEventListener('contextmenu', event => {
       $('file-menu-separator').hidden = true;
     }
   }).catch(error => {
+    if (request !== metadataRequest || contextInfo !== info) return;
     console.error('Error extracting metadata:', error);
     $('copy-file-metadata').hidden = true;
     $('file-menu-separator').hidden = true;
