@@ -2,6 +2,7 @@ import { arrayRaster, assignMask, colorAt, colorStops, fileInfo, inferExampleRul
 import { loadSampleFiles } from './samples.js';
 import { groupBaseRows, pairStatus, visibleDatasetRows } from './dataset-view.js';
 import { defaultSequenceAxes, openNpy, readSequenceFrame } from './sequence.js';
+import { extractMetadata, formatMetadata } from './metadata.js';
 
 const $ = id => document.getElementById(id);
 const baseCanvas = $('base-canvas');
@@ -1508,6 +1509,23 @@ datasetList.addEventListener('contextmenu', event => {
   const hasPath = info.path !== info.name;
   $('copy-file-path').disabled = !hasPath;
   $('file-menu-note').textContent = `${hasPath ? '' : 'No relative path is available for this file. '}Browsers cannot reveal local folders or access absolute paths.`;
+  
+  // Try to extract metadata asynchronously
+  extractMetadata(contextInfo.file).then(metadata => {
+    if (contextInfo === info && metadata) {
+      $('copy-file-metadata').hidden = false;
+      $('file-menu-separator').hidden = false;
+      $('copy-file-metadata').dataset.metadata = JSON.stringify(metadata);
+    } else {
+      $('copy-file-metadata').hidden = true;
+      $('file-menu-separator').hidden = true;
+    }
+  }).catch(error => {
+    console.error('Error extracting metadata:', error);
+    $('copy-file-metadata').hidden = true;
+    $('file-menu-separator').hidden = true;
+  });
+  
   fileMenu.hidden = false;
   const rect = item.getBoundingClientRect();
   const x = event.clientX || rect.left;
@@ -1527,6 +1545,21 @@ for (const [id, property, description] of [['copy-file-name', 'name', 'File name
     if (datasetVersion === state.datasetVersion) showNotice(`${description} copied.`);
   } catch (error) {
     if (datasetVersion === state.datasetVersion) showNotice(`Could not copy ${description.toLowerCase()}: ${error.message}`);
+  }
+});
+
+$('copy-file-metadata').addEventListener('click', async () => {
+  if (!contextInfo || !$('copy-file-metadata').dataset.metadata) return;
+  const datasetVersion = state.datasetVersion;
+  const metadata = JSON.parse($('copy-file-metadata').dataset.metadata);
+  const formattedMetadata = formatMetadata(metadata);
+  closeFileMenu(true);
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable; use HTTPS or localhost.');
+    await navigator.clipboard.writeText(formattedMetadata);
+    if (datasetVersion === state.datasetVersion) showNotice('Metadata copied.');
+  } catch (error) {
+    if (datasetVersion === state.datasetVersion) showNotice(`Could not copy metadata: ${error.message}`);
   }
 });
 document.addEventListener('pointerdown', event => {
